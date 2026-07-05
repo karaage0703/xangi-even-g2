@@ -49,12 +49,11 @@ bridge は薄い中継サーバーです。xangi 本体の改造は不要です�
 
 ### xangi workspace の skill として使う
 
-xangi workspace で使う場合は、workspace の `skills/` にこのリポジトリを clone します。
+xangi workspace で使う場合は、既存の `skills/` ディレクトリへ移動して、このリポジトリを clone します。
 
 ```bash
-cd /path/to/xangi-workspace
-mkdir -p skills
-git clone https://github.com/karaage0703/xangi-even-g2.git skills/xangi-even-g2
+cd /path/to/xangi-workspace/skills
+git clone https://github.com/karaage0703/xangi-even-g2.git xangi-even-g2
 ```
 
 clone 後、xangi に以下のように依頼できます。

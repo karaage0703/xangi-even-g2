@@ -48,12 +48,11 @@ cd xangi-even-g2
 npm install
 ```
 
-xangi workspace の skill として使う場合は、workspace の `skills/` に clone します。
+xangi workspace の skill として使う場合は、既存の `skills/` ディレクトリへ移動して clone します。
 
 ```bash
-cd /path/to/xangi-workspace
-mkdir -p skills
-git clone https://github.com/karaage0703/xangi-even-g2.git skills/xangi-even-g2
+cd /path/to/xangi-workspace/skills
+git clone https://github.com/karaage0703/xangi-even-g2.git xangi-even-g2
 ```
 
 clone 後、xangi に以下のように依頼できます。

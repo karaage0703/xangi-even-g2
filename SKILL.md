@@ -41,12 +41,12 @@ Use `docs/setup.md` as the canonical user-facing guide.
 
 ## Installing As A xangi Workspace Skill
 
-For a xangi workspace, clone the public repository into `skills/`:
+For a xangi workspace, move to the existing `skills/` directory and clone the
+public repository there:
 
 ```bash
-cd /path/to/xangi-workspace
-mkdir -p skills
-git clone https://github.com/karaage0703/xangi-even-g2.git skills/xangi-even-g2
+cd /path/to/xangi-workspace/skills
+git clone https://github.com/karaage0703/xangi-even-g2.git xangi-even-g2
 ```
 
 After clone, the user can ask xangi to use this skill and set up bridge / STT /

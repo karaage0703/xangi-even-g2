@@ -55,12 +55,11 @@ See [docs/setup.en.md](docs/setup.en.md) for the full xangi + Even G2 setup.
 
 ### Use As A xangi Workspace Skill
 
-In a xangi workspace, clone this repository into `skills/`.
+In a xangi workspace, move to the existing `skills/` directory and clone this repository there.
 
 ```bash
-cd /path/to/xangi-workspace
-mkdir -p skills
-git clone https://github.com/karaage0703/xangi-even-g2.git skills/xangi-even-g2
+cd /path/to/xangi-workspace/skills
+git clone https://github.com/karaage0703/xangi-even-g2.git xangi-even-g2
 ```
 
 Then ask xangi:
