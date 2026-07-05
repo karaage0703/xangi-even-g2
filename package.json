@@ -1,0 +1,26 @@
+{
+  "name": "xangi-even-g2",
+  "private": true,
+  "version": "0.1.6",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "pack": "npm run build && evenhub pack app.json ./dist --output ./xangi-even-g2.ehpk",
+    "pack:configured": "node scripts/pack-configured.mjs",
+    "pack:check": "npm run build && evenhub pack app.json ./dist --check --output ./xangi-even-g2.ehpk",
+    "qr": "evenhub qr --url http://localhost:5173",
+    "simulate": "evenhub-simulator http://localhost:5173"
+  },
+  "dependencies": {
+    "@evenrealities/even_hub_sdk": "^0.0.10"
+  },
+  "devDependencies": {
+    "@evenrealities/evenhub-cli": "^0.1.12",
+    "@evenrealities/evenhub-simulator": "^0.7.2",
+    "typescript": "^5.7.0",
+    "vite": "^8.1.3"
+  }
+}

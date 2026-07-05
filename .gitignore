@@ -1,0 +1,9 @@
+node_modules/
+dist/
+__pycache__/
+.venv/
+.env.local
+*.local
+*.ehpk
+bridge/.session_id
+public/

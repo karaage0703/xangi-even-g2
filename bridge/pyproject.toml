@@ -1,0 +1,15 @@
+[project]
+name = "xangi-even-g2-bridge"
+version = "0.1.0"
+description = "Bridge and local STT server for xangi-even-g2"
+requires-python = ">=3.12"
+dependencies = [
+  "llvmlite>=0.46",
+  "numba>=0.64",
+  "numpy>=2.3",
+  "openai-whisper==20250625",
+  "torch>=2.10",
+]
+
+[tool.uv]
+package = false

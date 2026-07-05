@@ -1,0 +1,26 @@
+{
+  "package_id": "com.karaage.xangig2",
+  "edition": "202601",
+  "name": "xangi for G2",
+  "version": "0.1.6",
+  "min_app_version": "2.0.0",
+  "min_sdk_version": "0.0.10",
+  "entrypoint": "index.html",
+  "permissions": [
+    {
+      "name": "g2-microphone",
+      "desc": "G2 microphone audio is used to send voice input to your xangi bridge."
+    },
+    {
+      "name": "network",
+      "desc": "The app connects to the configured xangi bridge URL to list sessions, send voice input, and receive replies.",
+      "whitelist": [
+        "https://your-bridge.example.com",
+        "https://your-bridge.example.com:8791",
+        "http://localhost:8791",
+        "http://127.0.0.1:8791"
+      ]
+    }
+  ],
+  "supported_languages": ["ja", "en"]
+}
