@@ -75,6 +75,7 @@ EVEN_BRIDGE_HOST=0.0.0.0
 EVEN_BRIDGE_PORT=8791
 EVEN_BRIDGE_TOKEN=change-this-to-a-long-random-token
 XANGI_BASE_URL=http://127.0.0.1:18888
+EVEN_HISTORY_MESSAGE_MAX_CHARS=60000
 
 EVEN_STT_HOST=127.0.0.1
 EVEN_STT_PORT=8792
@@ -87,6 +88,8 @@ Notes:
 - `XANGI_BASE_URL` must be the xangi Web endpoint with `/api/chat`.
 - `EVEN_BRIDGE_TOKEN` should be changed before exposing the bridge to your
   tailnet.
+- `EVEN_HISTORY_MESSAGE_MAX_CHARS` is the per-message limit sent to G2 history.
+  The app paginates it by measured pixels.
 - `EVEN_STT_MODEL=medium` is a good default for Japanese accuracy. Use `base`
   if memory is tight.
 

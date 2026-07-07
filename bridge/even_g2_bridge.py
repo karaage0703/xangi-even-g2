@@ -10,6 +10,7 @@ G2 マイク音声の STT、xangi terminal session 操作、Discord 投稿を中
   EVEN_BRIDGE_HOST    待受アドレス（既定 0.0.0.0）
   XANGI_BASE_URL      橋渡し先 xangi Web Chat（既定 http://127.0.0.1:3100）
   EVEN_MAX_CHARS      返答の最大文字数（既定 400）
+  EVEN_HISTORY_MESSAGE_MAX_CHARS G2履歴へ渡す1メッセージ最大文字数（既定 60000）
   EVEN_DISCORD_REPLY_TIMEOUT_SEC Discord返信生成の待ち時間（既定 1800）
   EVEN_SESSION_FILE   bridge 管理の xangi Web Chat session ID 保存ファイル
 """
@@ -35,7 +36,9 @@ PORT = int(os.environ.get("EVEN_BRIDGE_PORT", "8791"))
 HOST = os.environ.get("EVEN_BRIDGE_HOST", "0.0.0.0")
 XANGI_BASE_URL = os.environ.get("XANGI_BASE_URL", "http://127.0.0.1:3100").rstrip("/")
 MAX_CHARS = int(os.environ.get("EVEN_MAX_CHARS", "400"))
+HISTORY_MESSAGE_MAX_CHARS = int(os.environ.get("EVEN_HISTORY_MESSAGE_MAX_CHARS", "60000"))
 DISCORD_REPLY_TIMEOUT_SEC = float(os.environ.get("EVEN_DISCORD_REPLY_TIMEOUT_SEC", "1800"))
+DISCORD_REPLY_JOB_TTL_SEC = float(os.environ.get("EVEN_DISCORD_REPLY_JOB_TTL_SEC", "3600"))
 SESSION_FILE = os.environ.get(
     "EVEN_SESSION_FILE", os.path.join(os.path.dirname(__file__), ".session_id")
 )
@@ -46,6 +49,8 @@ DISCORD_GUILD_ID = os.environ.get("DISCORD_GUILD_ID", "").strip()
 DISCORD_DEFAULT_CHANNEL_ID = os.environ.get("DISCORD_DEFAULT_CHANNEL_ID", "").strip()
 DISCORD_API_BASE = os.environ.get("DISCORD_API_BASE", "https://discord.com/api/v10").rstrip("/")
 EVEN_DISCORD_SPEAKER_NAME = os.environ.get("EVEN_DISCORD_SPEAKER_NAME", "G2 User").strip()
+DISCORD_REPLY_JOBS: dict[str, dict] = {}
+DISCORD_REPLY_JOBS_LOCK = threading.Lock()
 
 # ---- STT 設定（メガネのマイク音声 -> テキスト）------------------------------
 # 既定はローカル Whisper。常駐 STT サーバ（stt_server.py）にまず転送し、不在なら
@@ -87,7 +92,11 @@ def save_session_id(sid: str) -> None:
 # ---------------------------------------------------------------------------
 # 整形: Markdown 除去 + 改行潰し + 文字数トリム（メガネ表示向け）
 # ---------------------------------------------------------------------------
-def clean_for_glasses(text: str, max_chars: int = MAX_CHARS) -> str:
+def clean_for_glasses(
+    text: str,
+    max_chars: int = MAX_CHARS,
+    collapse_newlines: bool = True,
+) -> str:
     if not text:
         return ""
     t = text
@@ -105,10 +114,15 @@ def clean_for_glasses(text: str, max_chars: int = MAX_CHARS) -> str:
     # リンク [text](url) -> text、画像 ![..](..) は落とす
     t = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", t)
     t = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", t)
-    # 改行は空白に（メガネは横長表示なので段組みを崩す）
-    t = re.sub(r"\n{2,}", " / ", t)
-    t = t.replace("\n", " ")
-    t = re.sub(r"[ \t]{2,}", " ", t).strip()
+    if collapse_newlines:
+        # 短い一覧表示は1行へ寄せる。
+        t = re.sub(r"\n{2,}", " / ", t)
+        t = t.replace("\n", " ")
+        t = re.sub(r"[ \t]{2,}", " ", t).strip()
+    else:
+        # 長文履歴はアプリ側の pixel pagination に任せるため段落を残す。
+        t = re.sub(r"[ \t]{2,}", " ", t)
+        t = re.sub(r"\n{3,}", "\n\n", t).strip()
     if len(t) > max_chars:
         t = t[: max_chars - 1].rstrip() + "…"
     return t
@@ -225,7 +239,7 @@ def clean_session_message_content(content: object, max_chars: int = 120) -> str:
         if stripped.startswith("[現在時刻:"):
             continue
         lines.append(line)
-    return clean_for_glasses("\n".join(lines), max_chars=max_chars)
+    return clean_for_glasses("\n".join(lines), max_chars=max_chars, collapse_newlines=False)
 
 
 def session_detail(session_id: str) -> dict:
@@ -274,7 +288,10 @@ def terminal_session_detail(session_id: str, limit: int = 20) -> dict:
         role = str(msg.get("role") or "")
         if role not in ("user", "assistant"):
             continue
-        text = clean_session_message_content(msg.get("content"), max_chars=1800)
+        text = clean_session_message_content(
+            msg.get("content"),
+            max_chars=HISTORY_MESSAGE_MAX_CHARS,
+        )
         if not text:
             continue
         cleaned.append(
@@ -425,7 +442,53 @@ def send_terminal_message(body: dict) -> dict:
     return request_json("POST", "/api/terminal/inbox", payload, timeout=5.0)
 
 
-def discord_reply_worker(channel_id: str, text: str, reply_to_message_id: str) -> None:
+def set_reply_job(job_id: str, **updates: object) -> None:
+    with DISCORD_REPLY_JOBS_LOCK:
+        job = DISCORD_REPLY_JOBS.setdefault(
+            job_id,
+            {
+                "job_id": job_id,
+                "status": "queued",
+                "created_at": time.time(),
+                "updated_at": time.time(),
+            },
+        )
+        job.update(updates)
+        job["updated_at"] = time.time()
+
+
+def get_reply_job(job_id: str) -> dict:
+    prune_reply_jobs()
+    with DISCORD_REPLY_JOBS_LOCK:
+        job = DISCORD_REPLY_JOBS.get(job_id)
+        if not job:
+            return {"ok": True, "job_id": job_id, "status": "expired"}
+        out = {
+            "ok": True,
+            "job_id": job_id,
+            "status": str(job.get("status") or "queued"),
+        }
+        if job.get("reply"):
+            out["reply"] = job["reply"]
+        if job.get("error"):
+            out["error"] = str(job.get("error") or "")
+        return out
+
+
+def prune_reply_jobs() -> None:
+    now = time.time()
+    with DISCORD_REPLY_JOBS_LOCK:
+        expired = [
+            job_id
+            for job_id, job in DISCORD_REPLY_JOBS.items()
+            if now - float(job.get("created_at") or now) > DISCORD_REPLY_JOB_TTL_SEC
+        ]
+        for job_id in expired:
+            DISCORD_REPLY_JOBS.pop(job_id, None)
+
+
+def discord_reply_worker(job_id: str, channel_id: str, text: str, reply_to_message_id: str) -> None:
+    set_reply_job(job_id, status="running")
     deadline = time.monotonic() + DISCORD_REPLY_TIMEOUT_SEC
     prompt = (
         "[プラットフォーム: Discord]\n"
@@ -437,14 +500,22 @@ def discord_reply_worker(channel_id: str, text: str, reply_to_message_id: str) -
     )
     try:
         answer = ask_xangi_with_retry(prompt, deadline)
-        cleaned = clean_for_glasses(answer, max_chars=1800) or "(応答が空でした)"
+        cleaned = clean_for_glasses(
+            answer,
+            max_chars=HISTORY_MESSAGE_MAX_CHARS,
+            collapse_newlines=False,
+        ) or "(応答が空でした)"
     except Exception as e:  # noqa: BLE001
         print(f"[bridge] WARN: discord async reply failed: {e}", file=sys.stderr)
         cleaned = f"(Even G2 bridge error: {e})"
+        set_reply_job(job_id, status="error", error=str(e), reply={"content": cleaned})
+        return
     try:
-        discord_send_message(channel_id, cleaned, reply_to_message_id=reply_to_message_id)
+        posted = discord_send_message(channel_id, cleaned, reply_to_message_id=reply_to_message_id)
+        set_reply_job(job_id, status="done", reply={"content": cleaned}, posted=posted)
     except Exception as e:  # noqa: BLE001
         print(f"[bridge] WARN: discord reply post failed: {e}", file=sys.stderr)
+        set_reply_job(job_id, status="error", error=str(e), reply={"content": cleaned})
 
 
 def post_terminal_session_message(body: dict) -> dict:
@@ -462,13 +533,19 @@ def post_terminal_session_message(body: dict) -> dict:
             raise ValueError("discord channel id missing")
         posted = discord_send_message(channel_id, format_g2_discord_post(text))
         reply_to = str(posted.get("id") or "")
-        if reply_to:
-            threading.Thread(
-                target=discord_reply_worker,
-                args=(channel_id, text, reply_to),
-                daemon=True,
-            ).start()
-        return {"ok": True, "posted": posted, "reply": "queued"}
+        job_id = f"discord-{int(time.time() * 1000)}-{reply_to or session_id}"
+        set_reply_job(
+            job_id,
+            status="queued",
+            channel_id=channel_id,
+            reply_to_message_id=reply_to,
+        )
+        threading.Thread(
+            target=discord_reply_worker,
+            args=(job_id, channel_id, text, reply_to),
+            daemon=True,
+        ).start()
+        return {"ok": True, "posted": posted, "reply": "queued", "reply_job_id": job_id}
     if platform == "web":
         return send_terminal_message(
             {
@@ -766,6 +843,16 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._send(200, json.dumps(out, ensure_ascii=False).encode())
             return
+        if path.endswith("/terminal/reply"):
+            if not self._authorized():
+                return
+            qs = urllib.parse.parse_qs(parsed.query)
+            job_id = (qs.get("job_id") or qs.get("jobId") or [""])[0].strip()
+            if not job_id:
+                self._err(400, "job_id is required")
+                return
+            self._send(200, json.dumps(get_reply_job(job_id), ensure_ascii=False).encode())
+            return
         if path.endswith("/discord/channels"):
             if not self._authorized():
                 return
@@ -934,7 +1021,8 @@ def main():
         f"          xangi   = {XANGI_BASE_URL}\n"
         f"          discord = {'ON' if DISCORD_BOT_TOKEN else 'OFF'}\n"
         f"          auth    = {'ON' if TOKEN else 'OFF (local only!)'}\n"
-        f"          maxchar = {MAX_CHARS}, discord_reply_timeout = {DISCORD_REPLY_TIMEOUT_SEC}s",
+        f"          maxchar = {MAX_CHARS}, history_maxchar = {HISTORY_MESSAGE_MAX_CHARS}, "
+        f"discord_reply_timeout = {DISCORD_REPLY_TIMEOUT_SEC}s",
         file=sys.stderr,
     )
     if os.environ.get("EVEN_PREWARM", "1") == "1":

@@ -13,6 +13,7 @@ import {
   openTerminalSession,
   listTerminalSessions,
   getTerminalSessionDetail,
+  getTerminalReply,
   postTerminalSessionMessage,
   terminalEventsUrl,
   type TerminalSession,
@@ -21,6 +22,7 @@ import {
 } from './bridge'
 import { mountUi, setStatus, setBody } from './ui'
 import { APP_BUILD_LABEL } from './version'
+import { G2_DISPLAY_HEIGHT, G2_DISPLAY_WIDTH, paginateText } from './paginate'
 
 function waitForLaunchSource(
   bridge: { onLaunchSource(callback: (source: string) => void): () => void },
@@ -64,7 +66,15 @@ const RECORDING = '録音中… 話してください。\nもう一度タップ�
 const AUTO_HIDE_MS = 30_000
 const SESSION_REFRESH_MS = 5_000
 const VISIBLE_SESSION_COUNT = 4
-const MESSAGE_PAGE_CHARS = 72
+const TEXT_CONTAINER_PADDING = 4
+const TEXT_INNER_WIDTH = G2_DISPLAY_WIDTH - TEXT_CONTAINER_PADDING * 2
+const HISTORY_PAGE_BOX = {
+  width: TEXT_INNER_WIDTH,
+  // The single TextContainer also carries a clock/status line and 2 hint lines.
+  // Keep body pages to 7 LVGL lines (7 * 27px) so the composed screen fits 576x288.
+  height: Math.min(189, G2_DISPLAY_HEIGHT - TEXT_CONTAINER_PADDING * 2),
+  maxPages: 255,
+}
 
 if (!bridgeConfigured()) {
   setStatus('error', 'Bridge URL 未設定')
@@ -181,6 +191,7 @@ let historyIndex = -1
 let historyPageIndex = 0
 let pendingQuestion = ''
 let pendingQuestionPageIndex = 0
+const replyPolls = new Map<string, number>()
 
 function appendPcm(chunk: Uint8Array) {
   if (state !== 'recording') return
@@ -315,17 +326,15 @@ function currentHistoryMessage(): TerminalSessionMessage | null {
 }
 
 function currentHistoryPages(): string[] {
-  return splitPages(currentHistoryMessage()?.content ?? '')
+  return displayPages(currentHistoryMessage()?.content ?? '')
 }
 
 function splitPages(text: string): string[] {
-  const normalized = String(text || '').replace(/\r\n/g, '\n').trim()
-  if (!normalized) return ['(空)']
-  const pages: string[] = []
-  for (let i = 0; i < normalized.length; i += MESSAGE_PAGE_CHARS) {
-    pages.push(normalized.slice(i, i + MESSAGE_PAGE_CHARS))
-  }
-  return pages.length ? pages : ['(空)']
+  return displayPages(text)
+}
+
+function displayPages(text: string): string[] {
+  return paginateText(text, HISTORY_PAGE_BOX)
 }
 
 function resetHistoryPage(toLastPage = false) {
@@ -367,6 +376,53 @@ function renderConfirming() {
   render(
     `聞き取り結果 p${pendingQuestionPageIndex + 1}/${pages.length}\n${pages[pendingQuestionPageIndex]}\nタップ:送信\nダブル:破棄`,
   )
+}
+
+function renderLiveAssistantText(text: string) {
+  const pages = displayPages(text)
+  const lastPage = pages[Math.max(0, pages.length - 1)]
+  render(`生成中 p${pages.length}/${pages.length}\n${lastPage}`)
+}
+
+function addAssistantHistory(content: string) {
+  historyMessages.push({
+    id: `assistant-${Date.now()}`,
+    role: 'assistant',
+    content,
+  })
+  historyIndex = historyMessages.length - 1
+  resetHistoryPage()
+}
+
+function startReplyPolling(jobId: string) {
+  if (!jobId || replyPolls.has(jobId)) return
+  const startedAt = Date.now()
+  const timer = window.setInterval(async () => {
+    try {
+      const result = await getTerminalReply(jobId)
+      if (result.status === 'done' && result.reply?.content) {
+        window.clearInterval(timer)
+        replyPolls.delete(jobId)
+        addAssistantHistory(result.reply.content)
+        if (viewMode === 'terminal') renderTerminalIdle()
+      } else if (result.status === 'error' || result.status === 'expired') {
+        window.clearInterval(timer)
+        replyPolls.delete(jobId)
+        addAssistantHistory(
+          result.reply?.content || result.error || 'Discord返信の取得に失敗しました',
+        )
+        if (viewMode === 'terminal') renderTerminalIdle()
+      }
+    } catch (err) {
+      if (Date.now() - startedAt > 60_000) {
+        window.clearInterval(timer)
+        replyPolls.delete(jobId)
+        addAssistantHistory(`Discord返信の確認に失敗: ${(err as Error)?.message ?? err}`)
+        if (viewMode === 'terminal') renderTerminalIdle()
+      }
+    }
+  }, 3_000)
+  replyPolls.set(jobId, timer)
 }
 
 function browsePendingQuestion(offset: number) {
@@ -431,7 +487,7 @@ function connectEvents(session: TerminalSession) {
         setStatus('thinking')
         if (payload.user_text) render(`Q: ${payload.user_text}\n\n考え中…`)
       } else if (payload.type === 'message.delta') {
-        render(payload.full_text || payload.text || '')
+        renderLiveAssistantText(payload.full_text || payload.text || '')
       } else if (payload.type === 'turn.complete') {
         const text = payload.text || '（応答が空でした）'
         historyMessages.push({
@@ -585,14 +641,10 @@ async function sendPendingQuestion() {
     if (terminalSummary?.platform === 'discord') {
       render(`投稿/応答中…\n${question}`)
       const result = await postTerminalSessionMessage(terminalSummary.id, question)
-      if (result?.reply?.content) {
-        historyMessages.push({
-          id: `assistant-${Date.now()}`,
-          role: 'assistant',
-          content: result.reply.content,
-        })
-        historyIndex = historyMessages.length - 1
-        resetHistoryPage()
+      if (typeof result?.reply === 'object' && result.reply?.content) {
+        addAssistantHistory(result.reply.content)
+      } else if (result?.reply_job_id) {
+        startReplyPolling(result.reply_job_id)
       }
       renderTerminalIdle()
       await toReady()
@@ -640,6 +692,8 @@ function cleanup() {
   cleanedUp = true
   eventSource?.close()
   stopSessionRefresh()
+  for (const timer of replyPolls.values()) window.clearInterval(timer)
+  replyPolls.clear()
   if (hideTimer !== null) window.clearTimeout(hideTimer)
   window.clearInterval(clockTimer)
   bridge.audioControl(false)
