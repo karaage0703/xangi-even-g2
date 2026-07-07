@@ -35,7 +35,7 @@ EVEN_BRIDGE_PORT=8791
 EVEN_BRIDGE_TOKEN=change-this-to-a-long-random-token
 XANGI_BASE_URL=http://127.0.0.1:18888
 EVEN_MAX_CHARS=400
-EVEN_DEADLINE_SEC=22
+EVEN_DISCORD_REPLY_TIMEOUT_SEC=1800
 
 EVEN_STT_HOST=127.0.0.1
 EVEN_STT_PORT=8792
@@ -48,6 +48,7 @@ EVEN_STT_LANG=ja
 - `XANGI_BASE_URL`: `/api/chat` を提供する xangi Web URL
 - `EVEN_BRIDGE_TOKEN`: G2 アプリから bridge へ送る Bearer token
 - `EVEN_BRIDGE_HOST`: Tailscale direct HTTP なら `0.0.0.0`、Tailscale Serve で出すなら `127.0.0.1` でも可
+- `EVEN_DISCORD_REPLY_TIMEOUT_SEC`: G2 から Discord セッションへ投稿した後、xangi の最終回答を待つ上限秒数。HTTP応答は先に返し、Discord返信は非同期で投稿します。
 - `EVEN_STT_MODEL`: 日本語精度優先なら `medium`、メモリを節約するなら `base`
 
 ## ローカル起動

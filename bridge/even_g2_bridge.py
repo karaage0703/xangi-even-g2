@@ -1,14 +1,8 @@
 #!/usr/bin/env python3
 """Even Realities G2 <-> xangi bridge.
 
-Even Hub の "Add Agent"（Name / URL / Token）から OpenAI 互換 POST を受けて、
-xangi の Web Chat API (/api/chat, SSE) に橋渡しし、G2 の表示制約に整形して返す。
-
-G2 / Even Hub 側の契約（reverse-eng + 先行ブリッジ実装より）:
-  - POST <root> に `{ "model": "...", "messages": [{role, content}, ...] }`
-  - Authorization: Bearer <token>
-  - レスポンスは OpenAI chat.completion 形式（content がメガネに表示される）
-  - 表示は ~400 字 / プレーンテキストのみ（Markdown 不可）/ タイムアウト ~30 秒
+Even Hub 専用アプリから呼ばれる HTTP bridge。
+G2 マイク音声の STT、xangi terminal session 操作、Discord 投稿を中継する。
 
 依存なし（Python 標準ライブラリのみ）。設定はすべて環境変数。
   EVEN_BRIDGE_TOKEN   受け付ける Bearer トークン（未設定なら認証スキップ・ローカル用）
@@ -16,8 +10,8 @@ G2 / Even Hub 側の契約（reverse-eng + 先行ブリッジ実装より）:
   EVEN_BRIDGE_HOST    待受アドレス（既定 0.0.0.0）
   XANGI_BASE_URL      橋渡し先 xangi Web Chat（既定 http://127.0.0.1:3100）
   EVEN_MAX_CHARS      返答の最大文字数（既定 400）
-  EVEN_DEADLINE_SEC   xangi 応答待ちの締切秒（既定 22、G2 の 30 秒より内側）
-  EVEN_SESSION_FILE   OpenAI互換 root endpoint の会話継続用セッションID保存ファイル
+  EVEN_DISCORD_REPLY_TIMEOUT_SEC Discord返信生成の待ち時間（既定 1800）
+  EVEN_SESSION_FILE   bridge 管理の xangi Web Chat session ID 保存ファイル
 """
 from __future__ import annotations
 
@@ -28,6 +22,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.request
 import urllib.error
@@ -40,7 +35,7 @@ PORT = int(os.environ.get("EVEN_BRIDGE_PORT", "8791"))
 HOST = os.environ.get("EVEN_BRIDGE_HOST", "0.0.0.0")
 XANGI_BASE_URL = os.environ.get("XANGI_BASE_URL", "http://127.0.0.1:3100").rstrip("/")
 MAX_CHARS = int(os.environ.get("EVEN_MAX_CHARS", "400"))
-DEADLINE_SEC = float(os.environ.get("EVEN_DEADLINE_SEC", "22"))
+DISCORD_REPLY_TIMEOUT_SEC = float(os.environ.get("EVEN_DISCORD_REPLY_TIMEOUT_SEC", "1800"))
 SESSION_FILE = os.environ.get(
     "EVEN_SESSION_FILE", os.path.join(os.path.dirname(__file__), ".session_id")
 )
@@ -69,7 +64,7 @@ STT_RATE = int(os.environ.get("EVEN_STT_RATE", "16000"))  # G2 マイク = 16kHz
 
 
 # ---------------------------------------------------------------------------
-# xangi セッション継続（G2 は会話の連続性を期待するので appSessionId を固定したい）
+# xangi セッション継続（bridge 側から xangi Web Chat を呼ぶ時の appSessionId）
 # ---------------------------------------------------------------------------
 def load_session_id() -> str:
     try:
@@ -430,6 +425,28 @@ def send_terminal_message(body: dict) -> dict:
     return request_json("POST", "/api/terminal/inbox", payload, timeout=5.0)
 
 
+def discord_reply_worker(channel_id: str, text: str, reply_to_message_id: str) -> None:
+    deadline = time.monotonic() + DISCORD_REPLY_TIMEOUT_SEC
+    prompt = (
+        "[プラットフォーム: Discord]\n"
+        f"[チャンネルID: {channel_id}]\n"
+        "[入力元: Even G2 音声投稿]\n"
+        f"まず `xangi-cmd discord_history --channel {channel_id} --count 10` で直近履歴を確認し、"
+        "文脈を踏まえて最終回答だけ返してください。\n"
+        f"{text}"
+    )
+    try:
+        answer = ask_xangi_with_retry(prompt, deadline)
+        cleaned = clean_for_glasses(answer, max_chars=1800) or "(応答が空でした)"
+    except Exception as e:  # noqa: BLE001
+        print(f"[bridge] WARN: discord async reply failed: {e}", file=sys.stderr)
+        cleaned = f"(Even G2 bridge error: {e})"
+    try:
+        discord_send_message(channel_id, cleaned, reply_to_message_id=reply_to_message_id)
+    except Exception as e:  # noqa: BLE001
+        print(f"[bridge] WARN: discord reply post failed: {e}", file=sys.stderr)
+
+
 def post_terminal_session_message(body: dict) -> dict:
     session_id = str(body.get("session_id") or body.get("sessionId") or body.get("appSessionId") or "").strip()
     text = str(body.get("text") or body.get("content") or "").strip()
@@ -444,21 +461,14 @@ def post_terminal_session_message(body: dict) -> dict:
         if not channel_id:
             raise ValueError("discord channel id missing")
         posted = discord_send_message(channel_id, format_g2_discord_post(text))
-        try:
-            deadline = time.monotonic() + DEADLINE_SEC
-            prompt = (
-                "[プラットフォーム: Discord]\n"
-                f"[チャンネルID: {channel_id}]\n"
-                "[入力元: Even G2 音声投稿]\n"
-                f"{text}"
-            )
-            answer = ask_xangi_with_retry(prompt, deadline)
-            cleaned = clean_for_glasses(answer, max_chars=1800) or "(応答が空でした)"
-            reply = discord_send_message(channel_id, cleaned, reply_to_message_id=posted.get("id"))
-            return {"ok": True, "posted": posted, "reply": reply}
-        except Exception as e:  # noqa: BLE001
-            print(f"[bridge] WARN: discord reply failed after posting: {e}", file=sys.stderr)
-            return {"ok": True, "posted": posted, "reply_error": str(e)}
+        reply_to = str(posted.get("id") or "")
+        if reply_to:
+            threading.Thread(
+                target=discord_reply_worker,
+                args=(channel_id, text, reply_to),
+                daemon=True,
+            ).start()
+        return {"ok": True, "posted": posted, "reply": "queued"}
     if platform == "web":
         return send_terminal_message(
             {
@@ -608,39 +618,6 @@ def discord_send_message(
         "channel_id": str(msg.get("channel_id") or channel_id),
         "content": str(msg.get("content") or text),
     }
-
-
-# ---------------------------------------------------------------------------
-# OpenAI chat.completion レスポンス組み立て
-# ---------------------------------------------------------------------------
-def completion_json(content: str, model: str) -> bytes:
-    obj = {
-        "id": f"evenbridge-{int(time.time() * 1000)}",
-        "object": "chat.completion",
-        "created": int(time.time()),
-        "model": model or "xangi",
-        "choices": [
-            {
-                "index": 0,
-                "message": {"role": "assistant", "content": content},
-                "finish_reason": "stop",
-            }
-        ],
-        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-    }
-    return json.dumps(obj, ensure_ascii=False).encode("utf-8")
-
-
-def extract_user_message(messages: list) -> str:
-    for m in reversed(messages or []):
-        if isinstance(m, dict) and m.get("role") == "user":
-            c = m.get("content")
-            if isinstance(c, str):
-                return c.strip()
-            if isinstance(c, list):  # OpenAI vision-style content parts
-                parts = [p.get("text", "") for p in c if isinstance(p, dict)]
-                return " ".join(parts).strip()
-    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -933,25 +910,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, json.dumps(out, ensure_ascii=False).encode())
             return
 
-        user_msg = extract_user_message(body.get("messages", []))
-        model = body.get("model", "xangi")
-        if not user_msg:
-            self._err(400, "no user message")
-            return
-
-        deadline = time.monotonic() + DEADLINE_SEC
-        try:
-            answer = ask_xangi_with_retry(user_msg, deadline)
-        except urllib.error.URLError as e:
-            self._send(200, completion_json(f"(xangi 接続エラー: {e.reason})", model))
-            return
-        except Exception as e:  # noqa: BLE001
-            self._send(200, completion_json(f"(エラー: {e})", model))
-            return
-
-        cleaned = clean_for_glasses(answer) or "(応答が空でした)"
-        print(f"[bridge] Q={user_msg[:60]!r} -> A={cleaned[:60]!r}", file=sys.stderr)
-        self._send(200, completion_json(cleaned, model))
+        self._err(410, "root chat endpoint is not supported; use /terminal/* and /stt")
 
 
 def prewarm():
@@ -975,7 +934,7 @@ def main():
         f"          xangi   = {XANGI_BASE_URL}\n"
         f"          discord = {'ON' if DISCORD_BOT_TOKEN else 'OFF'}\n"
         f"          auth    = {'ON' if TOKEN else 'OFF (local only!)'}\n"
-        f"          maxchar = {MAX_CHARS}, deadline = {DEADLINE_SEC}s",
+        f"          maxchar = {MAX_CHARS}, discord_reply_timeout = {DISCORD_REPLY_TIMEOUT_SEC}s",
         file=sys.stderr,
     )
     if os.environ.get("EVEN_PREWARM", "1") == "1":
