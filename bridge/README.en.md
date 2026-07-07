@@ -35,7 +35,9 @@ EVEN_BRIDGE_PORT=8791
 EVEN_BRIDGE_TOKEN=change-this-to-a-long-random-token
 XANGI_BASE_URL=http://127.0.0.1:18888
 EVEN_MAX_CHARS=400
+EVEN_HISTORY_MESSAGE_MAX_CHARS=60000
 EVEN_DISCORD_REPLY_TIMEOUT_SEC=1800
+EVEN_DISCORD_REPLY_JOB_TTL_SEC=3600
 
 EVEN_STT_HOST=127.0.0.1
 EVEN_STT_PORT=8792
@@ -48,7 +50,10 @@ Important values:
 - `XANGI_BASE_URL`: xangi Web URL that provides `/api/chat`
 - `EVEN_BRIDGE_TOKEN`: Bearer token expected from the G2 app
 - `EVEN_BRIDGE_HOST`: use `0.0.0.0` for Tailscale direct HTTP; `127.0.0.1` is enough when publishing with Tailscale Serve
+- `EVEN_MAX_CHARS`: short root-compatible response limit. Terminal history display does not use this limit
+- `EVEN_HISTORY_MESSAGE_MAX_CHARS`: per-message limit sent to G2 history. The app performs pixel-based pagination
 - `EVEN_DISCORD_REPLY_TIMEOUT_SEC`: Max seconds to wait for the final xangi reply after a G2 post to a Discord session. The HTTP request returns first; the Discord reply is posted asynchronously.
+- `EVEN_DISCORD_REPLY_JOB_TTL_SEC`: How long async Discord replies remain available for G2 app polling
 - `EVEN_STT_MODEL`: `medium` is the recommended default for Japanese accuracy; use `base` if memory is tight
 
 ## Run Locally

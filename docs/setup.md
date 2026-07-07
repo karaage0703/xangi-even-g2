@@ -87,6 +87,7 @@ EVEN_BRIDGE_HOST=0.0.0.0
 EVEN_BRIDGE_PORT=8791
 EVEN_BRIDGE_TOKEN=change-this-to-a-long-random-token
 XANGI_BASE_URL=http://127.0.0.1:18888
+EVEN_HISTORY_MESSAGE_MAX_CHARS=60000
 
 EVEN_STT_HOST=127.0.0.1
 EVEN_STT_PORT=8792
@@ -99,6 +100,7 @@ EVEN_STT_LANG=ja
 - `XANGI_BASE_URL`: xangi Web endpoint
 - `EVEN_BRIDGE_TOKEN`: iPhone companion 画面に入力する token
 - `EVEN_BRIDGE_HOST`: Tailscale direct HTTP なら `0.0.0.0`
+- `EVEN_HISTORY_MESSAGE_MAX_CHARS`: G2 履歴へ渡す1メッセージ上限。アプリ側で pixel pagination して読めます
 - `EVEN_STT_MODEL`: 日本語精度重視なら `medium`、軽さ重視なら `base`
 
 依存関係を入れます。

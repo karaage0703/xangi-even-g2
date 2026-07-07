@@ -56,8 +56,17 @@ export interface TerminalSessionMessage {
 export interface PostTerminalSessionResult {
   ok?: boolean
   posted?: { content?: string }
-  reply?: { content?: string }
+  reply?: { content?: string } | 'queued'
+  reply_job_id?: string
   reply_error?: string
+}
+
+export interface TerminalReplyResult {
+  ok?: boolean
+  job_id?: string
+  status?: 'queued' | 'running' | 'done' | 'error' | 'expired' | string
+  reply?: { content?: string }
+  error?: string
 }
 
 export interface TerminalSessionDetail {
@@ -288,6 +297,17 @@ export async function postTerminalSessionMessage(
   })
   if (!res.ok) throw new Error(`POST HTTP ${res.status}: ${await responseErrorText(res)}`)
   return (await res.json()) as PostTerminalSessionResult
+}
+
+export async function getTerminalReply(jobId: string): Promise<TerminalReplyResult> {
+  const base = baseUrl()
+  const url = new URL(`${base}/terminal/reply`)
+  url.searchParams.set('job_id', jobId)
+  const res = await fetch(url.toString(), {
+    headers: authHeaders(),
+  })
+  if (!res.ok) throw new Error(`REPLY HTTP ${res.status}: ${await responseErrorText(res)}`)
+  return (await res.json()) as TerminalReplyResult
 }
 
 async function responseErrorText(res: Response): Promise<string> {
