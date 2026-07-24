@@ -14,6 +14,8 @@ Tailscale, the same style as a personal xangi deployment.
 - Creates a new xangi Web session from the glasses
 - Records G2 microphone audio with tap-to-start / tap-to-stop
 - Transcribes audio through a local Whisper server
+- Shows the conversation first and automatically adds xangi-generated reply suggestions as an extra page after the latest reply
+- Starts voice input immediately when the user taps
 - Posts the transcribed text to the selected xangi session
 - Shows xangi replies and session history on the glasses
 - Shows the build label on both the iPhone companion screen and G2 display

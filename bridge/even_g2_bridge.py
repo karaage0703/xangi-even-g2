@@ -51,7 +51,10 @@ DISCORD_API_BASE = os.environ.get("DISCORD_API_BASE", "https://discord.com/api/v
 EVEN_DISCORD_SPEAKER_NAME = os.environ.get("EVEN_DISCORD_SPEAKER_NAME", "G2 User").strip()
 DISCORD_REPLY_JOBS: dict[str, dict] = {}
 DISCORD_REPLY_JOBS_LOCK = threading.Lock()
-
+DISCORD_CHANNEL_CONTEXT_CACHE_TTL_SEC = 300.0
+DISCORD_CHANNEL_CONTEXT_CACHE: dict[str, dict] = {}
+DISCORD_CHANNEL_CONTEXT_CACHE_EXPIRES_AT = 0.0
+DISCORD_CHANNEL_CONTEXT_CACHE_LOCK = threading.Lock()
 # ---- STT 設定（メガネのマイク音声 -> テキスト）------------------------------
 # 既定はローカル Whisper。常駐 STT サーバ（stt_server.py）にまず転送し、不在なら
 # transcriber_tool の subprocess にフォールバックする。クラウド STT に替えたいときは
@@ -275,14 +278,18 @@ def session_latest_message(session_id: str) -> tuple[str, str]:
     return "", ""
 
 
-def terminal_session_detail(session_id: str, limit: int = 20) -> dict:
+def terminal_session_detail(
+    session_id: str,
+    limit: int = 20,
+    start: int | None = None,
+) -> dict:
     detail = session_detail(session_id)
     messages = detail.get("messages", []) if isinstance(detail, dict) else []
     if not isinstance(messages, list):
         messages = []
     safe_limit = max(1, min(50, int(limit or 20)))
-    cleaned = []
-    for msg in messages[-safe_limit:]:
+    cleaned_messages = []
+    for msg in messages:
         if not isinstance(msg, dict):
             continue
         role = str(msg.get("role") or "")
@@ -294,19 +301,46 @@ def terminal_session_detail(session_id: str, limit: int = 20) -> dict:
         )
         if not text:
             continue
-        cleaned.append(
-            {
-                "id": str(msg.get("id") or ""),
-                "role": role,
-                "content": text,
-                "createdAt": str(msg.get("createdAt") or ""),
-            }
-        )
+        item = {
+            "id": str(msg.get("id") or ""),
+            "role": role,
+            "content": text,
+            "createdAt": str(msg.get("createdAt") or ""),
+        }
+        raw_suggestions = msg.get("replySuggestions")
+        if isinstance(raw_suggestions, list):
+            suggestions: list[str] = []
+            seen: set[str] = set()
+            for value in raw_suggestions:
+                if not isinstance(value, str):
+                    continue
+                candidate = clean_for_glasses(value, max_chars=60, collapse_newlines=True)
+                if not candidate or candidate in seen:
+                    continue
+                seen.add(candidate)
+                suggestions.append(candidate)
+                if len(suggestions) >= 5:
+                    break
+            if suggestions:
+                item["replySuggestions"] = suggestions
+        cleaned_messages.append(item)
+    total_messages = len(cleaned_messages)
+    if start is None:
+        slice_start = max(0, total_messages - safe_limit)
+    else:
+        slice_start = max(0, min(int(start), total_messages))
+    slice_end = min(total_messages, slice_start + safe_limit)
+    cleaned = cleaned_messages[slice_start:slice_end]
     return {
         "id": str(detail.get("id") or session_id),
         "title": clean_for_glasses(str(detail.get("title") or session_id), max_chars=80),
         "platform": str(detail.get("platform") or ""),
         "messages": cleaned,
+        "start": slice_start,
+        "end": slice_end,
+        "totalMessages": total_messages,
+        "hasOlder": slice_start > 0,
+        "hasNewer": slice_end < total_messages,
     }
 
 
@@ -389,7 +423,17 @@ def list_terminal_sessions(limit: int = 10) -> dict:
         )
     candidates.sort(key=session_sort_key, reverse=True)
     out = candidates[:safe_limit]
+    discord_contexts: dict[str, dict] = {}
+    if any(item.get("platform") == "discord" for item in out):
+        try:
+            discord_contexts = discord_channel_contexts()
+        except Exception as e:  # noqa: BLE001
+            print(f"[bridge] WARN: Discord channel context lookup failed: {e}", file=sys.stderr)
     for item in out:
+        if item.get("platform") == "discord":
+            context = discord_contexts.get(str(item.get("contextKey") or ""))
+            if context:
+                item.update(context)
         last_role, last_message = session_latest_message(item["id"])
         item["lastRole"] = last_role
         item["lastMessage"] = last_message
@@ -402,9 +446,9 @@ def list_terminal_sessions(limit: int = 10) -> dict:
 def session_sort_key(item: dict) -> tuple[int, str, int]:
     platform_priority = 2 if item.get("platform") in ("discord", "slack") else 1
     return (
-        platform_priority,
-        str(item.get("updatedAt") or ""),
         1 if item.get("isActive") else 0,
+        str(item.get("updatedAt") or ""),
+        platform_priority,
     )
 
 
@@ -557,6 +601,28 @@ def post_terminal_session_message(body: dict) -> dict:
     raise ValueError(f"{platform or 'unknown'} session is read-only")
 
 
+def generate_terminal_candidates(body: dict) -> dict:
+    session_id = str(body.get("session_id") or body.get("sessionId") or "").strip()
+    if not session_id:
+        raise ValueError("session_id is required")
+    detail = terminal_session_detail(session_id, limit=20)
+    candidates: list[str] = []
+    messages = detail.get("messages", []) if isinstance(detail, dict) else []
+    for message in reversed(messages if isinstance(messages, list) else []):
+        if not isinstance(message, dict):
+            continue
+        if message.get("role") != "assistant":
+            break
+        stored = message.get("replySuggestions")
+        if isinstance(stored, list):
+            candidates = [value for value in stored if isinstance(value, str) and value.strip()]
+        break
+    return {
+        "ok": True,
+        "candidates": [{"text": c} for c in candidates[:5]],
+    }
+
+
 # ---------------------------------------------------------------------------
 # Discord Bot API（G2 からチャンネルを読み、確認後に投稿する）
 # ---------------------------------------------------------------------------
@@ -595,6 +661,57 @@ def discord_guild_ids() -> list[str]:
     if not isinstance(guilds, list):
         return []
     return [str(g.get("id")) for g in guilds if isinstance(g, dict) and g.get("id")]
+
+
+def discord_channel_contexts() -> dict[str, dict]:
+    global DISCORD_CHANNEL_CONTEXT_CACHE_EXPIRES_AT
+    with DISCORD_CHANNEL_CONTEXT_CACHE_LOCK:
+        now = time.monotonic()
+        if now < DISCORD_CHANNEL_CONTEXT_CACHE_EXPIRES_AT:
+            return {key: dict(value) for key, value in DISCORD_CHANNEL_CONTEXT_CACHE.items()}
+
+        contexts: dict[str, dict] = {}
+        for gid in discord_guild_ids():
+            quoted_gid = urllib.parse.quote(gid, safe="")
+            raw_channels = discord_request("GET", f"/guilds/{quoted_gid}/channels")
+            if not isinstance(raw_channels, list):
+                raw_channels = []
+            for channel in raw_channels:
+                if not isinstance(channel, dict):
+                    continue
+                channel_id = str(channel.get("id") or "")
+                name = str(channel.get("name") or "").strip()
+                if not channel_id or not name:
+                    continue
+                contexts[channel_id] = {
+                    "channelName": name,
+                    "parentChannelName": "",
+                    "isThread": False,
+                }
+
+            active = discord_request("GET", f"/guilds/{quoted_gid}/threads/active")
+            threads = active.get("threads", []) if isinstance(active, dict) else []
+            if not isinstance(threads, list):
+                threads = []
+            for thread in threads:
+                if not isinstance(thread, dict):
+                    continue
+                thread_id = str(thread.get("id") or "")
+                name = str(thread.get("name") or "").strip()
+                if not thread_id or not name:
+                    continue
+                parent_id = str(thread.get("parent_id") or "")
+                parent = contexts.get(parent_id, {})
+                contexts[thread_id] = {
+                    "channelName": name,
+                    "parentChannelName": str(parent.get("channelName") or ""),
+                    "isThread": True,
+                }
+
+        DISCORD_CHANNEL_CONTEXT_CACHE.clear()
+        DISCORD_CHANNEL_CONTEXT_CACHE.update(contexts)
+        DISCORD_CHANNEL_CONTEXT_CACHE_EXPIRES_AT = now + DISCORD_CHANNEL_CONTEXT_CACHE_TTL_SEC
+        return {key: dict(value) for key, value in contexts.items()}
 
 
 def discord_channels() -> dict:
@@ -834,7 +951,9 @@ class Handler(BaseHTTPRequestHandler):
             session_id = (qs.get("session_id") or qs.get("sessionId") or [""])[0].strip()
             try:
                 limit = int((qs.get("limit") or ["20"])[0])
-                out = terminal_session_detail(session_id, limit=limit)
+                raw_start = (qs.get("start") or [""])[0].strip()
+                start = int(raw_start) if raw_start else None
+                out = terminal_session_detail(session_id, limit=limit, start=start)
             except ValueError as e:
                 self._err(400, str(e))
                 return
@@ -980,6 +1099,18 @@ class Handler(BaseHTTPRequestHandler):
                 self._err(502, f"terminal post error: {e}")
                 return
             self._send(202, json.dumps(out, ensure_ascii=False).encode())
+            return
+
+        if path.endswith("/terminal/candidates"):
+            try:
+                out = generate_terminal_candidates(body)
+            except ValueError as e:
+                self._err(400, str(e))
+                return
+            except Exception as e:  # noqa: BLE001
+                self._err(502, f"terminal candidates error: {e}")
+                return
+            self._send(200, json.dumps(out, ensure_ascii=False).encode())
             return
 
         if path.endswith("/discord/messages"):

@@ -44,6 +44,9 @@ export interface TerminalSessionSummary {
   remainingSec?: number
   lastMessage?: string
   lastRole?: string
+  channelName?: string
+  parentChannelName?: string
+  isThread?: boolean
 }
 
 export interface TerminalSessionMessage {
@@ -69,11 +72,20 @@ export interface TerminalReplyResult {
   error?: string
 }
 
+export interface TerminalCandidate {
+  text: string
+}
+
 export interface TerminalSessionDetail {
   id: string
   title: string
   platform?: 'web' | 'discord' | 'slack' | string
   messages: TerminalSessionMessage[]
+  start?: number
+  end?: number
+  totalMessages?: number
+  hasOlder?: boolean
+  hasNewer?: boolean
 }
 
 export interface DiscordChannel {
@@ -254,11 +266,13 @@ export async function listTerminalSessions(limit = 10): Promise<{
 export async function getTerminalSessionDetail(
   sessionId: string,
   limit = 20,
+  start?: number,
 ): Promise<TerminalSessionDetail> {
   const base = baseUrl()
   const url = new URL(`${base}/terminal/session`)
   url.searchParams.set('session_id', sessionId)
   url.searchParams.set('limit', String(limit))
+  if (typeof start === 'number') url.searchParams.set('start', String(start))
   const res = await fetch(url.toString(), {
     headers: authHeaders(),
   })
@@ -308,6 +322,20 @@ export async function getTerminalReply(jobId: string): Promise<TerminalReplyResu
   })
   if (!res.ok) throw new Error(`REPLY HTTP ${res.status}: ${await responseErrorText(res)}`)
   return (await res.json()) as TerminalReplyResult
+}
+
+export async function generateTerminalCandidates(
+  sessionId: string,
+): Promise<TerminalCandidate[]> {
+  const base = baseUrl()
+  const res = await fetch(`${base}/terminal/candidates`, {
+    method: 'POST',
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ session_id: sessionId }),
+  })
+  if (!res.ok) throw new Error(`CANDIDATES HTTP ${res.status}: ${await responseErrorText(res)}`)
+  const data = (await res.json()) as { candidates?: TerminalCandidate[] }
+  return (data.candidates ?? []).filter(c => typeof c.text === 'string' && c.text.trim())
 }
 
 async function responseErrorText(res: Response): Promise<string> {
