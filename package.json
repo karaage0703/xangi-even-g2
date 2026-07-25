@@ -1,12 +1,13 @@
 {
   "name": "xangi-even-g2",
   "private": true,
-  "version": "0.1.7",
+  "version": "0.1.16",
   "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
+    "test": "node --experimental-strip-types --test tests/*.test.ts",
     "preview": "vite preview",
     "pack": "npm run build && evenhub pack app.json ./dist --output ./xangi-even-g2.ehpk",
     "pack:configured": "node scripts/pack-configured.mjs",

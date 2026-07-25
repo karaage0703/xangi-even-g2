@@ -14,8 +14,10 @@ import {
   listTerminalSessions,
   getTerminalSessionDetail,
   getTerminalReply,
+  generateTerminalCandidates,
   postTerminalSessionMessage,
   terminalEventsUrl,
+  type TerminalCandidate,
   type TerminalSession,
   type TerminalSessionMessage,
   type TerminalSessionSummary,
@@ -23,6 +25,8 @@ import {
 import { mountUi, setStatus, setBody } from './ui'
 import { APP_BUILD_LABEL } from './version'
 import { G2_DISPLAY_HEIGHT, G2_DISPLAY_WIDTH, paginateText } from './paginate'
+import { candidateIndexForPage, virtualPageCount } from './history-pages'
+import { clickGuardDeadline, shouldIgnoreSingleClick } from './click-guard'
 
 function waitForLaunchSource(
   bridge: { onLaunchSource(callback: (source: string) => void): () => void },
@@ -65,14 +69,15 @@ const PROMPT = bridgeConfigured()
 const RECORDING = '録音中… 話してください。\nもう一度タップで送信。'
 const AUTO_HIDE_MS = 30_000
 const SESSION_REFRESH_MS = 5_000
+const DOUBLE_TAP_NAV_DELAY_MS = 350
+const GESTURE_COLLISION_GUARD_MS = 700
 const VISIBLE_SESSION_COUNT = 4
 const TEXT_CONTAINER_PADDING = 4
 const TEXT_INNER_WIDTH = G2_DISPLAY_WIDTH - TEXT_CONTAINER_PADDING * 2
 const HISTORY_PAGE_BOX = {
   width: TEXT_INNER_WIDTH,
-  // The single TextContainer also carries a clock/status line and 2 hint lines.
-  // Keep body pages to 7 LVGL lines (7 * 27px) so the composed screen fits 576x288.
-  height: Math.min(189, G2_DISPLAY_HEIGHT - TEXT_CONTAINER_PADDING * 2),
+  // Reserve one line each for status, page metadata, and controls.
+  height: Math.min(162, G2_DISPLAY_HEIGHT - TEXT_CONTAINER_PADDING * 2),
   maxPages: 255,
 }
 
@@ -110,6 +115,9 @@ let pendingContent = ''
 let renderTimer: number | null = null
 let displayVisible = true
 let hideTimer: number | null = null
+let pendingTerminalExitTimer: number | null = null
+let ignoreSingleClickUntil = 0
+let lastScrollAt = 0
 
 function clockText(now = new Date()): string {
   return now.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' })
@@ -144,12 +152,14 @@ function flushRender() {
   }, 120)
 }
 
-function render(text: string) {
+function render(text: string, options: { wake?: boolean; extendAutoHide?: boolean } = {}) {
+  const wake = options.wake ?? true
+  const extendAutoHide = options.extendAutoHide ?? true
   bodyContent = text
   setBody(text)
-  displayVisible = true
+  if (wake) displayVisible = true
   flushRender()
-  scheduleAutoHide()
+  if (extendAutoHide) scheduleAutoHide()
 }
 
 function scheduleAutoHide() {
@@ -189,9 +199,14 @@ let sessionRefreshTimer: number | null = null
 let historyMessages: TerminalSessionMessage[] = []
 let historyIndex = -1
 let historyPageIndex = 0
+let historyStart = 0
+let historyEnd = 0
+let historyTotal = 0
 let pendingQuestion = ''
 let pendingQuestionPageIndex = 0
+let replyCandidates: TerminalCandidate[] = []
 const replyPolls = new Map<string, number>()
+const HISTORY_BATCH_SIZE = 30
 
 function appendPcm(chunk: Uint8Array) {
   if (state !== 'recording') return
@@ -242,6 +257,8 @@ function formatSessionList(): string {
 }
 
 function sessionListText(s: TerminalSessionSummary): string {
+  const location = discordSessionLocation(s, 28)
+  if (location) return location
   const latest = latestMessageLine(s, 28)
   if (latest) return latest
   return s.title.length > 28 ? `${s.title.slice(0, 27)}…` : s.title
@@ -249,15 +266,31 @@ function sessionListText(s: TerminalSessionSummary): string {
 
 function sessionDetail(s: TerminalSessionSummary): string {
   const platform = platformName(s)
+  const location = discordSessionLocation(s, 44, true)
   const latest = latestMessageLine(s)
   if (s.isActive || s.status === 'busy') {
     const remaining = formatRemaining(s)
-    const status = `${platform} 作業中${remaining ? ` 残り${remaining}` : ''}`
+    const status = `${location || platform} 作業中${remaining ? ` 残り${remaining}` : ''}`
     return latest ? `${status}\n${latest}` : status
   }
+  if (location) return latest ? `${location}\n${latest}` : location
   if (latest) return latest
   if (s.messageCount) return `${platform} 履歴 ${s.messageCount} 件`
   return `${platform} 待機中`
+}
+
+function discordSessionLocation(
+  s: TerminalSessionSummary,
+  maxChars: number,
+  includeParent = false,
+): string {
+  if (s.platform !== 'discord' || !s.channelName) return ''
+  const thread = s.isThread ? `T: ${s.channelName}` : `#${s.channelName}`
+  const label =
+    includeParent && s.isThread && s.parentChannelName
+      ? `#${s.parentChannelName} / ${thread}`
+      : thread
+  return label.length > maxChars ? `${label.slice(0, Math.max(1, maxChars - 1))}…` : label
 }
 
 function latestMessageLine(s: TerminalSessionSummary, maxChars = 44): string {
@@ -304,9 +337,38 @@ function renderTerminalIdle() {
   const summary = terminalSummary ?? currentSession()
   const platform = summary ? platformLabel(summary) : 'W'
   const history = historyBlock()
-  const postHint = summary?.platform === 'discord' ? 'タップ:音声投稿' : 'タップ:音声入力'
-  const navHint = historyMessages.length > 1 || currentHistoryPages().length > 1 ? '上下:読む ' : ''
-  render(`${platform} ${APP_BUILD_LABEL}\n${history}\n${navHint}${postHint}\nダブル:一覧`)
+  if (currentReplyCandidate()) {
+    render(`${platform} ${APP_BUILD_LABEL} ${history}\nダブル:一覧`)
+    return
+  }
+  const navHint = historyMessages.length > 1 || currentHistoryPageCount() > 1 ? '上下:読む ' : ''
+  render(`${platform} ${APP_BUILD_LABEL} ${history}\n${navHint}タップ:音声 ダブル:一覧`)
+}
+
+function visibleReplyCandidates(): TerminalCandidate[] {
+  return replyCandidates.slice(0, 3)
+}
+
+function shouldShowReplyCandidates(): boolean {
+  const message = currentHistoryMessage()
+  const absoluteIndex = historyStart + historyIndex
+  return (
+    replyCandidates.length > 0 &&
+    message?.role === 'assistant' &&
+    absoluteIndex === historyTotal - 1
+  )
+}
+
+function currentReplyCandidate(): TerminalCandidate | null {
+  if (!shouldShowReplyCandidates()) return null
+  const candidates = visibleReplyCandidates()
+  const index = candidateIndexForPage(
+    historyPageIndex,
+    currentHistoryPages().length,
+    candidates.length,
+  )
+  if (index === null) return null
+  return candidates[index] ?? null
 }
 
 function historyBlock(): string {
@@ -314,10 +376,18 @@ function historyBlock(): string {
   const msg = currentHistoryMessage()
   if (!msg) return '履歴なし'
   const pages = currentHistoryPages()
-  const safePage = Math.max(0, Math.min(historyPageIndex, pages.length - 1))
+  const pageCount = currentHistoryPageCount()
+  const safePage = Math.max(0, Math.min(historyPageIndex, pageCount - 1))
   const prefix = msg.role === 'user' ? 'Q' : 'A'
-  const pos = `${historyIndex + 1}/${historyMessages.length}`
-  return `${pos} ${prefix} p${safePage + 1}/${pages.length}\n${pages[safePage]}`
+  const pos = `${historyStart + historyIndex + 1}/${historyTotal}`
+  if (safePage >= pages.length) {
+    const candidates = visibleReplyCandidates()
+    const candidateIndex = safePage - pages.length
+    const candidate = candidates[candidateIndex]
+    const text = candidate ? displayPages(candidate.text)[0] : '候補なし'
+    return `${pos} AI候補 ${candidateIndex + 1}/${candidates.length}\n${text}\nタップ:送信`
+  }
+  return `${pos} ${prefix} p${safePage + 1}/${pageCount}\n${pages[safePage]}`
 }
 
 function currentHistoryMessage(): TerminalSessionMessage | null {
@@ -326,7 +396,14 @@ function currentHistoryMessage(): TerminalSessionMessage | null {
 }
 
 function currentHistoryPages(): string[] {
-  return displayPages(currentHistoryMessage()?.content ?? '')
+  return paginateText(currentHistoryMessage()?.content ?? '', HISTORY_PAGE_BOX)
+}
+
+function currentHistoryPageCount(): number {
+  return virtualPageCount(
+    currentHistoryPages().length,
+    shouldShowReplyCandidates() ? visibleReplyCandidates().length : 0,
+  )
 }
 
 function splitPages(text: string): string[] {
@@ -338,26 +415,77 @@ function displayPages(text: string): string[] {
 }
 
 function resetHistoryPage(toLastPage = false) {
-  const pages = currentHistoryPages()
-  historyPageIndex = toLastPage ? Math.max(0, pages.length - 1) : 0
+  historyPageIndex = toLastPage ? Math.max(0, currentHistoryPageCount() - 1) : 0
 }
 
 async function loadTerminalHistory(sessionId: string) {
-  const detail = await getTerminalSessionDetail(sessionId, 30)
+  const detail = await getTerminalSessionDetail(sessionId, HISTORY_BATCH_SIZE)
+  applyHistoryWindow(detail, 'latest')
+}
+
+function applyHistoryWindow(
+  detail: Awaited<ReturnType<typeof getTerminalSessionDetail>>,
+  edge: 'oldest' | 'latest',
+) {
   historyMessages = detail.messages
-  historyIndex = historyMessages.length - 1
+  historyStart = detail.start ?? Math.max(0, (detail.totalMessages ?? detail.messages.length) - detail.messages.length)
+  historyEnd = detail.end ?? historyStart + detail.messages.length
+  historyTotal = detail.totalMessages ?? historyEnd
+  historyIndex = edge === 'oldest' ? 0 : historyMessages.length - 1
   resetHistoryPage()
 }
 
-function browseHistory(offset: number) {
+async function loadHistoryWindow(edge: 'oldest' | 'latest') {
+  if (!terminalSession) return
+  state = 'thinking'
+  setStatus('thinking')
+  render(edge === 'oldest' ? '最初の履歴を読込中…' : '最新の履歴を読込中…')
+  try {
+    const start = edge === 'oldest' ? 0 : undefined
+    const detail = await getTerminalSessionDetail(terminalSession.session_id, HISTORY_BATCH_SIZE, start)
+    applyHistoryWindow(detail, edge)
+    if (edge === 'latest') resetHistoryPage(true)
+  } finally {
+    state = 'ready'
+    setStatus('ready')
+  }
+}
+
+async function loadAdjacentHistory(direction: -1 | 1): Promise<boolean> {
+  if (!terminalSession) return false
+  if (direction < 0 && historyStart <= 0) return false
+  if (direction > 0 && historyEnd >= historyTotal) return false
+  const limit =
+    direction < 0
+      ? Math.min(HISTORY_BATCH_SIZE, historyStart)
+      : Math.min(HISTORY_BATCH_SIZE, historyTotal - historyEnd)
+  const start = direction < 0 ? historyStart - limit : historyEnd
+  state = 'thinking'
+  setStatus('thinking')
+  render(direction < 0 ? '前の履歴を読込中…' : '次の履歴を読込中…')
+  try {
+    const detail = await getTerminalSessionDetail(terminalSession.session_id, limit, start)
+    applyHistoryWindow(detail, direction < 0 ? 'latest' : 'oldest')
+    return historyMessages.length > 0
+  } finally {
+    state = 'ready'
+    setStatus('ready')
+  }
+}
+
+async function browseHistory(offset: number) {
   if (state !== 'ready' || viewMode !== 'terminal' || !historyMessages.length) return
-  const pages = currentHistoryPages()
+  const pageCount = currentHistoryPageCount()
   if (offset > 0) {
-    if (historyPageIndex < pages.length - 1) {
+    if (historyPageIndex < pageCount - 1) {
       historyPageIndex += 1
     } else if (historyIndex < historyMessages.length - 1) {
       historyIndex += 1
       resetHistoryPage()
+    } else if (await loadAdjacentHistory(1)) {
+      resetHistoryPage()
+    } else {
+      await loadHistoryWindow('oldest')
     }
   } else if (offset < 0) {
     if (historyPageIndex > 0) {
@@ -365,9 +493,26 @@ function browseHistory(offset: number) {
     } else if (historyIndex > 0) {
       historyIndex -= 1
       resetHistoryPage(true)
+    } else if (await loadAdjacentHistory(-1)) {
+      resetHistoryPage(true)
+    } else {
+      await loadHistoryWindow('latest')
     }
   }
   renderTerminalIdle()
+}
+
+function appendLatestHistory(message: TerminalSessionMessage) {
+  if (historyEnd < historyTotal) {
+    historyMessages = []
+    historyStart = historyTotal
+    historyEnd = historyTotal
+  }
+  historyMessages.push(message)
+  historyTotal += 1
+  historyEnd = historyTotal
+  historyIndex = historyMessages.length - 1
+  resetHistoryPage()
 }
 
 function renderConfirming() {
@@ -385,13 +530,11 @@ function renderLiveAssistantText(text: string) {
 }
 
 function addAssistantHistory(content: string) {
-  historyMessages.push({
+  appendLatestHistory({
     id: `assistant-${Date.now()}`,
     role: 'assistant',
     content,
   })
-  historyIndex = historyMessages.length - 1
-  resetHistoryPage()
 }
 
 function startReplyPolling(jobId: string) {
@@ -404,7 +547,10 @@ function startReplyPolling(jobId: string) {
         window.clearInterval(timer)
         replyPolls.delete(jobId)
         addAssistantHistory(result.reply.content)
-        if (viewMode === 'terminal') renderTerminalIdle()
+        if (viewMode === 'terminal') {
+          renderTerminalIdle()
+          void refreshReplyCandidates()
+        }
       } else if (result.status === 'error' || result.status === 'expired') {
         window.clearInterval(timer)
         replyPolls.delete(jobId)
@@ -435,6 +581,20 @@ function browsePendingQuestion(offset: number) {
   renderConfirming()
 }
 
+async function refreshReplyCandidates(): Promise<void> {
+  if (!terminalSession) return
+  const sessionId = terminalSession.session_id
+  let candidates: TerminalCandidate[] = []
+  try {
+    candidates = await generateTerminalCandidates(terminalSummary?.id ?? sessionId)
+  } catch (err) {
+    console.error('Failed to load reply candidates', err)
+  }
+  if (terminalSession?.session_id !== sessionId) return
+  replyCandidates = candidates
+  if (viewMode === 'terminal' && state === 'ready') renderTerminalIdle()
+}
+
 async function loadSessionList() {
   const result = await listTerminalSessions(12)
   const selectedId = currentSession()?.id
@@ -460,7 +620,7 @@ function startSessionRefresh() {
     if (viewMode !== 'sessions' || state !== 'ready') return
     try {
       await loadSessionList()
-      render(formatSessionList())
+      render(formatSessionList(), { wake: false, extendAutoHide: false })
     } catch {
       // 次回の更新で復帰させる。メガネ表示は直前の一覧を維持する。
     }
@@ -490,15 +650,16 @@ function connectEvents(session: TerminalSession) {
         renderLiveAssistantText(payload.full_text || payload.text || '')
       } else if (payload.type === 'turn.complete') {
         const text = payload.text || '（応答が空でした）'
-        historyMessages.push({
+        appendLatestHistory({
           id: `assistant-${Date.now()}`,
           role: 'assistant',
           content: text,
         })
-        historyIndex = historyMessages.length - 1
-        resetHistoryPage()
-        renderTerminalIdle()
-        void toReady()
+        void (async () => {
+          await toReady()
+          renderTerminalIdle()
+          await refreshReplyCandidates()
+        })()
       } else if (payload.type === 'agent.error') {
         render(`エラー: ${payload.message || 'agent error'}\nタップで再試行。`)
         void toReady()
@@ -537,8 +698,9 @@ async function openSelectedSession() {
       eventSource?.close()
       eventSource = null
     }
-    renderTerminalIdle()
     await toReady()
+    renderTerminalIdle()
+    void refreshReplyCandidates()
   } catch (err) {
     render(`セッションエラー: ${(err as Error)?.message ?? err}`)
     await toReady()
@@ -546,12 +708,17 @@ async function openSelectedSession() {
 }
 
 async function showSessionList() {
+  await bridge.audioControl(false)
   eventSource?.close()
   eventSource = null
   terminalSession = null
   terminalSummary = null
   historyMessages = []
   historyIndex = -1
+  historyStart = 0
+  historyEnd = 0
+  historyTotal = 0
+  replyCandidates = []
   viewMode = 'sessions'
   state = 'thinking'
   setStatus('thinking')
@@ -590,7 +757,7 @@ async function submit() {
   setStatus('thinking')
   await bridge.audioControl(false)
   if (bufLen === 0) {
-    render('音声が入りませんでした。\nタップでもう一度。')
+    render('音声が入りませんでした。\nタップでもう一度録音。')
     await toReady()
     return
   }
@@ -599,7 +766,7 @@ async function submit() {
   try {
     const question = await transcribe(pcm)
     if (!question) {
-      render('うまく聞き取れませんでした。\nタップでもう一度。')
+      render('うまく聞き取れませんでした。\nタップでもう一度録音。')
       await toReady()
       return
     }
@@ -623,6 +790,12 @@ async function sendPendingQuestion() {
   if (state !== 'confirming' || !pendingQuestion) return
   const question = pendingQuestion
   pendingQuestion = ''
+  await sendTextToTerminal(question)
+}
+
+async function sendTextToTerminal(text: string) {
+  const question = text.trim()
+  if (!question) return
   state = 'thinking'
   setStatus('thinking')
   if (!terminalSession) {
@@ -631,18 +804,21 @@ async function sendPendingQuestion() {
     return
   }
   try {
-    historyMessages.push({
+    appendLatestHistory({
       id: `local-${Date.now()}`,
       role: 'user',
       content: question,
     })
-    historyIndex = historyMessages.length - 1
-    resetHistoryPage()
+    replyCandidates = []
     if (terminalSummary?.platform === 'discord') {
       render(`投稿/応答中…\n${question}`)
       const result = await postTerminalSessionMessage(terminalSummary.id, question)
       if (typeof result?.reply === 'object' && result.reply?.content) {
         addAssistantHistory(result.reply.content)
+        await toReady()
+        renderTerminalIdle()
+        await refreshReplyCandidates()
+        return
       } else if (result?.reply_job_id) {
         startReplyPolling(result.reply_job_id)
       }
@@ -672,12 +848,39 @@ function onSingleClick() {
   if (state === 'ready' && viewMode === 'sessions') {
     void openSelectedSession()
   } else if (state === 'ready' && viewMode === 'terminal') {
-    void startRecording()
+    const candidate = currentReplyCandidate()
+    if (candidate) {
+      ignoreSingleClickUntil = clickGuardDeadline(Date.now(), GESTURE_COLLISION_GUARD_MS)
+      void sendTextToTerminal(candidate.text)
+    } else void startRecording()
   } else if (state === 'recording') {
     void submit()
   } else if (state === 'confirming') {
     void sendPendingQuestion()
   }
+}
+
+function cancelPendingTerminalExit() {
+  if (pendingTerminalExitTimer === null) return
+  window.clearTimeout(pendingTerminalExitTimer)
+  pendingTerminalExitTimer = null
+}
+
+function noteScrollGesture() {
+  lastScrollAt = Date.now()
+  cancelPendingTerminalExit()
+}
+
+function scheduleTerminalExit() {
+  const now = Date.now()
+  ignoreSingleClickUntil = now + GESTURE_COLLISION_GUARD_MS
+  cancelPendingTerminalExit()
+  if (now - lastScrollAt < GESTURE_COLLISION_GUARD_MS) return
+
+  pendingTerminalExitTimer = window.setTimeout(() => {
+    pendingTerminalExitTimer = null
+    if (viewMode === 'terminal') void showSessionList()
+  }, DOUBLE_TAP_NAV_DELAY_MS)
 }
 
 if (bridgeConfigured()) {
@@ -692,6 +895,7 @@ function cleanup() {
   cleanedUp = true
   eventSource?.close()
   stopSessionRefresh()
+  cancelPendingTerminalExit()
   for (const timer of replyPolls.values()) window.clearInterval(timer)
   replyPolls.clear()
   if (hideTimer !== null) window.clearTimeout(hideTimer)
@@ -717,30 +921,14 @@ const unsubscribe = bridge.onEvenHubEvent(event => {
   const textType = envelopeType(event.textEvent)
 
   if (
-    sysType === OsEventTypeList.DOUBLE_CLICK_EVENT ||
-    textType === OsEventTypeList.DOUBLE_CLICK_EVENT
-  ) {
-    if (wakeDisplay()) return
-    if (state === 'confirming') {
-      void discardPendingQuestion()
-      return
-    }
-    if (viewMode === 'terminal') {
-      void showSessionList()
-      return
-    }
-    bridge.shutDownPageContainer(1)
-    return
-  }
-
-  if (
     sysType === OsEventTypeList.SCROLL_TOP_EVENT ||
     textType === OsEventTypeList.SCROLL_TOP_EVENT
   ) {
+    noteScrollGesture()
     if (wakeDisplay()) return
     if (state === 'confirming') browsePendingQuestion(-1)
     else if (viewMode === 'sessions') selectSession(-1)
-    else if (viewMode === 'terminal') browseHistory(-1)
+    else if (viewMode === 'terminal') void browseHistory(-1)
     return
   }
 
@@ -748,10 +936,29 @@ const unsubscribe = bridge.onEvenHubEvent(event => {
     sysType === OsEventTypeList.SCROLL_BOTTOM_EVENT ||
     textType === OsEventTypeList.SCROLL_BOTTOM_EVENT
   ) {
+    noteScrollGesture()
     if (wakeDisplay()) return
     if (state === 'confirming') browsePendingQuestion(1)
     else if (viewMode === 'sessions') selectSession(1)
-    else if (viewMode === 'terminal') browseHistory(1)
+    else if (viewMode === 'terminal') void browseHistory(1)
+    return
+  }
+
+  if (
+    sysType === OsEventTypeList.DOUBLE_CLICK_EVENT ||
+    textType === OsEventTypeList.DOUBLE_CLICK_EVENT
+  ) {
+    ignoreSingleClickUntil = clickGuardDeadline(Date.now(), GESTURE_COLLISION_GUARD_MS)
+    if (wakeDisplay()) return
+    if (state === 'confirming') {
+      void discardPendingQuestion()
+      return
+    }
+    if (viewMode === 'terminal') {
+      scheduleTerminalExit()
+      return
+    }
+    bridge.shutDownPageContainer(1)
     return
   }
 
@@ -767,6 +974,7 @@ const unsubscribe = bridge.onEvenHubEvent(event => {
     sysType === OsEventTypeList.CLICK_EVENT ||
     textType === OsEventTypeList.CLICK_EVENT
   ) {
+    if (shouldIgnoreSingleClick(Date.now(), ignoreSingleClickUntil)) return
     onSingleClick()
   }
 })

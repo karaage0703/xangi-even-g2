@@ -229,16 +229,19 @@ Controls:
 
 - Session list
   - Up/down scroll: select session
+  - Discord sessions show regular channels as `#channel-name` and threads as `T: thread-name`
   - Tap: open selected session
   - `+ New Session`: create a new Web session
   - Double tap: exit
 - Session screen
-  - Up/down scroll: move through history/pages
+  - Up/down scroll: move through history/pages; adjacent history loads in batches of 30
+  - Moving before the first page wraps to the latest page; moving after the final page wraps to the first page
+  - Show xangi-generated reply suggestions as an extra page after the latest reply; fixed fallback suggestions are not shown
   - Tap: start recording
   - Tap again: stop recording and show transcription confirmation
   - Tap on confirmation: send
   - Double tap on confirmation: discard
-  - Double tap on session screen: return to session list
+  - Double tap on the session screen: return to the session list
 
 Discord sessions are posted through the bridge using the configured xangi
 Discord integration. Posts are labeled as coming from G2 because Discord bot
