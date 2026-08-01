@@ -156,7 +156,7 @@ function render(text: string, options: { wake?: boolean; extendAutoHide?: boolea
   const wake = options.wake ?? true
   const extendAutoHide = options.extendAutoHide ?? true
   bodyContent = text
-  setBody(text)
+  setBody(text, state === 'ready' && viewMode === 'sessions' ? 'session-list' : 'wrapped')
   if (wake) displayVisible = true
   flushRender()
   if (extendAutoHide) scheduleAutoHide()
@@ -822,7 +822,7 @@ async function sendTextToTerminal(text: string) {
       } else if (result?.reply_job_id) {
         startReplyPolling(result.reply_job_id)
       }
-      renderTerminalIdle()
+      render(`応答を処理中…\n${question}`)
       await toReady()
       return
     }

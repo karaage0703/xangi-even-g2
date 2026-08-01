@@ -2,7 +2,7 @@
 
 [Japanese README](README.md)
 
-Even Realities G2 glasses client for xangi.
+Even Realities G2 glasses client for [xangi](https://github.com/karaage0703/xangi).
 
 This repository contains the Even Hub app, a small xangi bridge, and a local
 Whisper STT server. The recommended setup is private tailnet access with

@@ -2,7 +2,7 @@
 
 [English README](README.en.md)
 
-Even Realities G2 から xangi を使うための Even Hub アプリです。
+Even Realities G2 から [xangi](https://github.com/karaage0703/xangi) を使うための Even Hub アプリです。
 
 このリポジトリには、G2 用アプリ、xangi へ接続する bridge、音声認識用のローカル Whisper STT サーバーが含まれます。基本方針は Store 配布ではなく、GitHub から取得して Tailscale 経由で個人の xangi に接続する構成です。
 
