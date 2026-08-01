@@ -10,6 +10,7 @@ import {
 import { APP_BUILD_LABEL } from './version'
 
 type Status = 'connecting' | 'ready' | 'recording' | 'thinking' | 'error'
+export type BodyLayout = 'wrapped' | 'session-list'
 
 let statusEl: HTMLDivElement
 let bodyEl: HTMLDivElement
@@ -78,9 +79,22 @@ export function setStatus(kind: Status, text?: string) {
 }
 
 /** メガネに出すのと同じ本文を companion 画面にミラーする。 */
-export function setBody(text: string) {
+export function setBody(text: string, layout: BodyLayout = 'wrapped') {
   if (!bodyEl) return
-  bodyEl.textContent = text
+  bodyEl.classList.toggle('body-session-list', layout === 'session-list')
+  if (layout === 'wrapped') {
+    bodyEl.textContent = text
+    return
+  }
+
+  const fragment = document.createDocumentFragment()
+  for (const line of text.split('\n')) {
+    const row = document.createElement('div')
+    row.className = 'body-line'
+    row.textContent = line || '\u00a0'
+    fragment.appendChild(row)
+  }
+  bodyEl.replaceChildren(fragment)
 }
 
 function bindSettingsForm() {
@@ -155,6 +169,9 @@ function injectStyles() {
     .body { flex: 1; overflow: auto; background: #2E2E2E; border: 1px solid #3E3E3E;
       color: #E5E5E5; border-radius: 12px; padding: 20px; font-size: 18px; line-height: 1.5;
       min-height: 180px; white-space: pre-wrap; word-break: break-word; }
+    .body-session-list { overflow-x: hidden; white-space: normal; word-break: normal; }
+    .body-session-list .body-line { min-width: 0; overflow: hidden; text-overflow: ellipsis;
+      white-space: nowrap; }
     footer { font-size: 12px; color: #7B7B7B; text-align: center; }
   `
   const style = document.createElement('style')

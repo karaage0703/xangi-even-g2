@@ -2,7 +2,7 @@
   "package_id": "com.karaage.xangig2",
   "edition": "202601",
   "name": "xangi for G2",
-  "version": "0.1.16",
+  "version": "0.1.19",
   "min_app_version": "2.0.0",
   "min_sdk_version": "0.0.10",
   "entrypoint": "index.html",

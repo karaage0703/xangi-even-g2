@@ -49,6 +49,10 @@ DISCORD_GUILD_ID = os.environ.get("DISCORD_GUILD_ID", "").strip()
 DISCORD_DEFAULT_CHANNEL_ID = os.environ.get("DISCORD_DEFAULT_CHANNEL_ID", "").strip()
 DISCORD_API_BASE = os.environ.get("DISCORD_API_BASE", "https://discord.com/api/v10").rstrip("/")
 EVEN_DISCORD_SPEAKER_NAME = os.environ.get("EVEN_DISCORD_SPEAKER_NAME", "G2 User").strip()
+EVEN_DISCORD_PROCESSING_REACTION = os.environ.get(
+    "EVEN_DISCORD_PROCESSING_REACTION",
+    "👀",
+).strip()
 DISCORD_REPLY_JOBS: dict[str, dict] = {}
 DISCORD_REPLY_JOBS_LOCK = threading.Lock()
 DISCORD_CHANNEL_CONTEXT_CACHE_TTL_SEC = 300.0
@@ -347,7 +351,7 @@ def terminal_session_detail(
 def remaining_seconds(timeout_at: object) -> int:
     try:
         target = int(float(str(timeout_at or "0")))
-    except ValueError:
+    except (TypeError, ValueError, OverflowError):
         return 0
     if target <= 0:
         return 0
@@ -404,6 +408,8 @@ def list_terminal_sessions(limit: int = 10) -> dict:
         if not sid:
             continue
         timeout_at = s.get("timeoutAt")
+        remaining_sec = remaining_seconds(timeout_at)
+        is_busy = s.get("isActive") is True
         candidates.append(
             {
                 "id": sid,
@@ -412,11 +418,11 @@ def list_terminal_sessions(limit: int = 10) -> dict:
                 "contextKey": str(s.get("contextKey") or ""),
                 "updatedAt": str(s.get("updatedAt") or ""),
                 "messageCount": int(s.get("messageCount") or 0),
-                "status": "busy" if s.get("isActive") else "idle",
-                "isActive": bool(s.get("isActive")),
+                "status": "busy" if is_busy else "idle",
+                "isActive": is_busy,
                 "timeoutAt": str(timeout_at or ""),
                 "timeoutMs": int(s.get("timeoutMs") or 0),
-                "remainingSec": remaining_seconds(timeout_at),
+                "remainingSec": remaining_sec,
                 "lastRole": "",
                 "lastMessage": "",
             }
@@ -443,11 +449,11 @@ def list_terminal_sessions(limit: int = 10) -> dict:
     }
 
 
-def session_sort_key(item: dict) -> tuple[int, str, int]:
+def session_sort_key(item: dict) -> tuple[str, int, int]:
     platform_priority = 2 if item.get("platform") in ("discord", "slack") else 1
     return (
-        1 if item.get("isActive") else 0,
         str(item.get("updatedAt") or ""),
+        1 if item.get("isActive") else 0,
         platform_priority,
     )
 
@@ -531,35 +537,64 @@ def prune_reply_jobs() -> None:
             DISCORD_REPLY_JOBS.pop(job_id, None)
 
 
-def discord_reply_worker(job_id: str, channel_id: str, text: str, reply_to_message_id: str) -> None:
-    set_reply_job(job_id, status="running")
-    deadline = time.monotonic() + DISCORD_REPLY_TIMEOUT_SEC
-    prompt = (
-        "[プラットフォーム: Discord]\n"
-        f"[チャンネルID: {channel_id}]\n"
-        "[入力元: Even G2 音声投稿]\n"
-        f"まず `xangi-cmd discord_history --channel {channel_id} --count 10` で直近履歴を確認し、"
-        "文脈を踏まえて最終回答だけ返してください。\n"
-        f"{text}"
-    )
+def discord_reply_worker(
+    job_id: str,
+    channel_id: str,
+    text: str,
+    reply_to_message_id: str,
+    processing_reaction: str = "",
+) -> None:
     try:
-        answer = ask_xangi_with_retry(prompt, deadline)
-        cleaned = clean_for_glasses(
-            answer,
-            max_chars=HISTORY_MESSAGE_MAX_CHARS,
-            collapse_newlines=False,
-        ) or "(応答が空でした)"
-    except Exception as e:  # noqa: BLE001
-        print(f"[bridge] WARN: discord async reply failed: {e}", file=sys.stderr)
-        cleaned = f"(Even G2 bridge error: {e})"
-        set_reply_job(job_id, status="error", error=str(e), reply={"content": cleaned})
-        return
-    try:
-        posted = discord_send_message(channel_id, cleaned, reply_to_message_id=reply_to_message_id)
-        set_reply_job(job_id, status="done", reply={"content": cleaned}, posted=posted)
-    except Exception as e:  # noqa: BLE001
-        print(f"[bridge] WARN: discord reply post failed: {e}", file=sys.stderr)
-        set_reply_job(job_id, status="error", error=str(e), reply={"content": cleaned})
+        set_reply_job(job_id, status="running")
+        deadline = time.monotonic() + DISCORD_REPLY_TIMEOUT_SEC
+        prompt = (
+            "[プラットフォーム: Discord]\n"
+            f"[チャンネルID: {channel_id}]\n"
+            "[入力元: Even G2 音声投稿]\n"
+            f"まず `xangi-cmd discord_history --channel {channel_id} --count 10` で直近履歴を確認し、"
+            "文脈を踏まえて最終回答だけ返してください。\n"
+            f"{text}"
+        )
+        try:
+            answer = ask_xangi_with_retry(prompt, deadline)
+            cleaned = clean_for_glasses(
+                answer,
+                max_chars=HISTORY_MESSAGE_MAX_CHARS,
+                collapse_newlines=False,
+            ) or "(応答が空でした)"
+        except Exception as e:  # noqa: BLE001
+            print(f"[bridge] WARN: discord async reply failed: {e}", file=sys.stderr)
+            cleaned = f"(Even G2 bridge error: {e})"
+            try:
+                discord_send_message(
+                    channel_id,
+                    cleaned,
+                    reply_to_message_id=reply_to_message_id,
+                )
+            except Exception as post_error:  # noqa: BLE001
+                print(f"[bridge] WARN: discord error post failed: {post_error}", file=sys.stderr)
+            set_reply_job(job_id, status="error", error=str(e), reply={"content": cleaned})
+            return
+        try:
+            posted = discord_send_message(
+                channel_id,
+                cleaned,
+                reply_to_message_id=reply_to_message_id,
+            )
+            set_reply_job(job_id, status="done", reply={"content": cleaned}, posted=posted)
+        except Exception as e:  # noqa: BLE001
+            print(f"[bridge] WARN: discord reply post failed: {e}", file=sys.stderr)
+            set_reply_job(job_id, status="error", error=str(e), reply={"content": cleaned})
+    finally:
+        if processing_reaction:
+            try:
+                discord_remove_reaction(
+                    channel_id,
+                    reply_to_message_id,
+                    processing_reaction,
+                )
+            except Exception as e:  # noqa: BLE001
+                print(f"[bridge] WARN: discord reaction removal failed: {e}", file=sys.stderr)
 
 
 def post_terminal_session_message(body: dict) -> dict:
@@ -577,16 +612,31 @@ def post_terminal_session_message(body: dict) -> dict:
             raise ValueError("discord channel id missing")
         posted = discord_send_message(channel_id, format_g2_discord_post(text))
         reply_to = str(posted.get("id") or "")
+        processing_reaction = ""
+        if EVEN_DISCORD_PROCESSING_REACTION and reply_to:
+            try:
+                discord_add_reaction(
+                    channel_id,
+                    reply_to,
+                    EVEN_DISCORD_PROCESSING_REACTION,
+                )
+                processing_reaction = EVEN_DISCORD_PROCESSING_REACTION
+            except Exception as e:  # noqa: BLE001
+                print(
+                    f"[bridge] WARN: discord processing reaction failed, continuing: {e}",
+                    file=sys.stderr,
+                )
         job_id = f"discord-{int(time.time() * 1000)}-{reply_to or session_id}"
         set_reply_job(
             job_id,
             status="queued",
             channel_id=channel_id,
             reply_to_message_id=reply_to,
+            processing_reaction=processing_reaction,
         )
         threading.Thread(
             target=discord_reply_worker,
-            args=(job_id, channel_id, text, reply_to),
+            args=(job_id, channel_id, text, reply_to, processing_reaction),
             daemon=True,
         ).start()
         return {"ok": True, "posted": posted, "reply": "queued", "reply_job_id": job_id}
@@ -812,6 +862,29 @@ def discord_send_message(
         "channel_id": str(msg.get("channel_id") or channel_id),
         "content": str(msg.get("content") or text),
     }
+
+
+def discord_reaction_path(channel_id: str, message_id: str, emoji: str) -> str:
+    if not re.fullmatch(r"\d{8,25}", channel_id or ""):
+        raise ValueError("invalid channel_id")
+    if not re.fullmatch(r"\d{8,25}", message_id or ""):
+        raise ValueError("invalid message_id")
+    value = str(emoji or "").strip()
+    if not value:
+        raise ValueError("emoji is required")
+    return (
+        f"/channels/{urllib.parse.quote(channel_id, safe='')}"
+        f"/messages/{urllib.parse.quote(message_id, safe='')}"
+        f"/reactions/{urllib.parse.quote(value, safe='')}/@me"
+    )
+
+
+def discord_add_reaction(channel_id: str, message_id: str, emoji: str) -> None:
+    discord_request("PUT", discord_reaction_path(channel_id, message_id, emoji))
+
+
+def discord_remove_reaction(channel_id: str, message_id: str, emoji: str) -> None:
+    discord_request("DELETE", discord_reaction_path(channel_id, message_id, emoji))
 
 
 # ---------------------------------------------------------------------------
