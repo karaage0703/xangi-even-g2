@@ -12,7 +12,6 @@ G2 マイク音声の STT、xangi terminal session 操作、Discord 投稿を中
   EVEN_MAX_CHARS      返答の最大文字数（既定 400）
   EVEN_HISTORY_MESSAGE_MAX_CHARS G2履歴へ渡す1メッセージ最大文字数（既定 60000）
   EVEN_DISCORD_REPLY_TIMEOUT_SEC Discord返信生成の待ち時間（既定 1800）
-  EVEN_SESSION_FILE   bridge 管理の xangi Web Chat session ID 保存ファイル
 """
 from __future__ import annotations
 
@@ -39,9 +38,6 @@ MAX_CHARS = int(os.environ.get("EVEN_MAX_CHARS", "400"))
 HISTORY_MESSAGE_MAX_CHARS = int(os.environ.get("EVEN_HISTORY_MESSAGE_MAX_CHARS", "60000"))
 DISCORD_REPLY_TIMEOUT_SEC = float(os.environ.get("EVEN_DISCORD_REPLY_TIMEOUT_SEC", "1800"))
 DISCORD_REPLY_JOB_TTL_SEC = float(os.environ.get("EVEN_DISCORD_REPLY_JOB_TTL_SEC", "3600"))
-SESSION_FILE = os.environ.get(
-    "EVEN_SESSION_FILE", os.path.join(os.path.dirname(__file__), ".session_id")
-)
 DISCORD_BOT_TOKEN = (
     os.environ.get("DISCORD_BOT_TOKEN", "") or os.environ.get("DISCORD_TOKEN", "")
 ).strip()
@@ -73,27 +69,6 @@ STT_MODEL = os.environ.get("EVEN_STT_MODEL", "base")
 STT_LANG = os.environ.get("EVEN_STT_LANG", "ja")
 STT_TIMEOUT = float(os.environ.get("EVEN_STT_TIMEOUT", "60"))
 STT_RATE = int(os.environ.get("EVEN_STT_RATE", "16000"))  # G2 マイク = 16kHz mono s16le
-
-
-# ---------------------------------------------------------------------------
-# xangi セッション継続（bridge 側から xangi Web Chat を呼ぶ時の appSessionId）
-# ---------------------------------------------------------------------------
-def load_session_id() -> str:
-    try:
-        with open(SESSION_FILE, "r", encoding="utf-8") as f:
-            return f.read().strip()
-    except OSError:
-        return ""
-
-
-def save_session_id(sid: str) -> None:
-    if not sid:
-        return
-    try:
-        with open(SESSION_FILE, "w", encoding="utf-8") as f:
-            f.write(sid)
-    except OSError as e:
-        print(f"[bridge] WARN: failed to persist session id: {e}", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -133,80 +108,6 @@ def clean_for_glasses(
     if len(t) > max_chars:
         t = t[: max_chars - 1].rstrip() + "…"
     return t
-
-
-# ---------------------------------------------------------------------------
-# xangi /api/chat (SSE) を叩いて最終 done.response を取り出す
-# ---------------------------------------------------------------------------
-def ask_xangi(message: str, deadline: float) -> str:
-    sid = load_session_id()
-    payload = {"message": message}
-    if sid:
-        payload["appSessionId"] = sid
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        f"{XANGI_BASE_URL}/api/chat",
-        data=data,
-        method="POST",
-        headers={"Content-Type": "application/json", "Accept": "text/event-stream"},
-    )
-    remaining = max(1.0, deadline - time.monotonic())
-    final_text = ""
-    last_partial = ""
-    cur_event = ""
-    with urllib.request.urlopen(req, timeout=remaining) as resp:
-        for raw in resp:
-            if time.monotonic() > deadline:
-                break
-            line = raw.decode("utf-8", errors="replace").rstrip("\n")
-            if line.startswith("event:"):
-                cur_event = line[6:].strip()
-                continue
-            if line.startswith("data:"):
-                body = line[5:].strip()
-                try:
-                    obj = json.loads(body)
-                except json.JSONDecodeError:
-                    continue
-                if cur_event == "text" and isinstance(obj.get("fullText"), str):
-                    last_partial = obj["fullText"]
-                elif cur_event == "done":
-                    final_text = obj.get("response") or last_partial
-                    sid_new = obj.get("sessionId")
-                    if sid_new:
-                        save_session_id(str(sid_new))
-                    break
-                elif cur_event == "error":
-                    raise RuntimeError(obj.get("message", "xangi error"))
-    # done に届かず締切で抜けた場合は途中までのテキストを返す
-    return final_text or last_partial
-
-
-# xangi 側が「最終テキスト空」のとき返すフォールバック文の断片。
-# xangi の新規 web セッション初回ターンはこれを返しがちなので検知してリトライする。
-_FALLBACK_MARKERS = (
-    "うまく応答を組み立てられなかった",
-    "応答が空でした",
-    "質問をシンプルにして",
-)
-
-
-def looks_like_fallback(text: str) -> bool:
-    t = (text or "").strip()
-    if not t:
-        return True
-    return any(m in t for m in _FALLBACK_MARKERS)
-
-
-def ask_xangi_with_retry(message: str, deadline: float) -> str:
-    """1 回目がフォールバック/空で、締切に余裕があれば 1 度だけ再試行する。"""
-    answer = ask_xangi(message, deadline)
-    if looks_like_fallback(answer) and (deadline - time.monotonic()) > 6.0:
-        print("[bridge] fallback detected, retrying once", file=sys.stderr)
-        retry = ask_xangi(message, deadline)
-        if not looks_like_fallback(retry):
-            return retry
-    return answer
 
 
 def request_json(method: str, path: str, body: dict | None = None, timeout: float = 10.0) -> dict:
@@ -537,64 +438,33 @@ def prune_reply_jobs() -> None:
             DISCORD_REPLY_JOBS.pop(job_id, None)
 
 
-def discord_reply_worker(
-    job_id: str,
-    channel_id: str,
-    text: str,
-    reply_to_message_id: str,
-    processing_reaction: str = "",
-) -> None:
+def continue_discord_session(session_id: str, text: str) -> dict:
+    sid = urllib.parse.quote(str(session_id or "").strip(), safe="")
+    if not sid:
+        raise ValueError("session_id is required")
+    return request_json(
+        "POST",
+        f"/api/sessions/{sid}/discord-continue",
+        {"message": text},
+        timeout=DISCORD_REPLY_TIMEOUT_SEC,
+    )
+
+
+def discord_reply_worker(job_id: str, session_id: str, text: str) -> None:
+    set_reply_job(job_id, status="running")
     try:
-        set_reply_job(job_id, status="running")
-        deadline = time.monotonic() + DISCORD_REPLY_TIMEOUT_SEC
-        prompt = (
-            "[プラットフォーム: Discord]\n"
-            f"[チャンネルID: {channel_id}]\n"
-            "[入力元: Even G2 音声投稿]\n"
-            f"まず `xangi-cmd discord_history --channel {channel_id} --count 10` で直近履歴を確認し、"
-            "文脈を踏まえて最終回答だけ返してください。\n"
-            f"{text}"
-        )
-        try:
-            answer = ask_xangi_with_retry(prompt, deadline)
-            cleaned = clean_for_glasses(
-                answer,
-                max_chars=HISTORY_MESSAGE_MAX_CHARS,
-                collapse_newlines=False,
-            ) or "(応答が空でした)"
-        except Exception as e:  # noqa: BLE001
-            print(f"[bridge] WARN: discord async reply failed: {e}", file=sys.stderr)
-            cleaned = f"(Even G2 bridge error: {e})"
-            try:
-                discord_send_message(
-                    channel_id,
-                    cleaned,
-                    reply_to_message_id=reply_to_message_id,
-                )
-            except Exception as post_error:  # noqa: BLE001
-                print(f"[bridge] WARN: discord error post failed: {post_error}", file=sys.stderr)
-            set_reply_job(job_id, status="error", error=str(e), reply={"content": cleaned})
-            return
-        try:
-            posted = discord_send_message(
-                channel_id,
-                cleaned,
-                reply_to_message_id=reply_to_message_id,
-            )
-            set_reply_job(job_id, status="done", reply={"content": cleaned}, posted=posted)
-        except Exception as e:  # noqa: BLE001
-            print(f"[bridge] WARN: discord reply post failed: {e}", file=sys.stderr)
-            set_reply_job(job_id, status="error", error=str(e), reply={"content": cleaned})
-    finally:
-        if processing_reaction:
-            try:
-                discord_remove_reaction(
-                    channel_id,
-                    reply_to_message_id,
-                    processing_reaction,
-                )
-            except Exception as e:  # noqa: BLE001
-                print(f"[bridge] WARN: discord reaction removal failed: {e}", file=sys.stderr)
+        result = continue_discord_session(session_id, text)
+        cleaned = clean_for_glasses(
+            str(result.get("response") or ""),
+            max_chars=HISTORY_MESSAGE_MAX_CHARS,
+            collapse_newlines=False,
+        ) or "(応答が空でした)"
+    except Exception as e:  # noqa: BLE001
+        print(f"[bridge] WARN: discord async reply failed: {e}", file=sys.stderr)
+        cleaned = f"(Even G2 bridge error: {e})"
+        set_reply_job(job_id, status="error", error=str(e), reply={"content": cleaned})
+        return
+    set_reply_job(job_id, status="done", reply={"content": cleaned})
 
 
 def post_terminal_session_message(body: dict) -> dict:
@@ -607,39 +477,18 @@ def post_terminal_session_message(body: dict) -> dict:
     summary = terminal_session_summary(session_id)
     platform = str(summary.get("platform") or "web")
     if platform == "discord":
-        channel_id = str(summary.get("contextKey") or "").strip()
-        if not channel_id:
-            raise ValueError("discord channel id missing")
-        posted = discord_send_message(channel_id, format_g2_discord_post(text))
-        reply_to = str(posted.get("id") or "")
-        processing_reaction = ""
-        if EVEN_DISCORD_PROCESSING_REACTION and reply_to:
-            try:
-                discord_add_reaction(
-                    channel_id,
-                    reply_to,
-                    EVEN_DISCORD_PROCESSING_REACTION,
-                )
-                processing_reaction = EVEN_DISCORD_PROCESSING_REACTION
-            except Exception as e:  # noqa: BLE001
-                print(
-                    f"[bridge] WARN: discord processing reaction failed, continuing: {e}",
-                    file=sys.stderr,
-                )
-        job_id = f"discord-{int(time.time() * 1000)}-{reply_to or session_id}"
+        job_id = f"discord-{int(time.time() * 1000)}-{session_id}"
         set_reply_job(
             job_id,
             status="queued",
-            channel_id=channel_id,
-            reply_to_message_id=reply_to,
-            processing_reaction=processing_reaction,
+            session_id=session_id,
         )
         threading.Thread(
             target=discord_reply_worker,
-            args=(job_id, channel_id, text, reply_to, processing_reaction),
+            args=(job_id, session_id, text),
             daemon=True,
         ).start()
-        return {"ok": True, "posted": posted, "reply": "queued", "reply_job_id": job_id}
+        return {"ok": True, "reply": "queued", "reply_job_id": job_id}
     if platform == "web":
         return send_terminal_message(
             {
@@ -1204,21 +1053,6 @@ class Handler(BaseHTTPRequestHandler):
         self._err(410, "root chat endpoint is not supported; use /terminal/* and /stt")
 
 
-def prewarm():
-    """起動時に xangi セッションを温めておく（初回ターンの 17 秒コールドスタート +
-    空応答フォールバックを、ユーザーの最初の質問より前に消化しておく）。"""
-    import threading
-
-    def _run():
-        try:
-            ask_xangi("（接続テスト）準備OKならOKとだけ返して", time.monotonic() + 60.0)
-            print("[bridge] prewarm done (session ready)", file=sys.stderr)
-        except Exception as e:  # noqa: BLE001
-            print(f"[bridge] prewarm skipped: {e}", file=sys.stderr)
-
-    threading.Thread(target=_run, daemon=True).start()
-
-
 def main():
     print(
         f"[bridge] Even G2 <-> xangi bridge listening on {HOST}:{PORT}\n"
@@ -1229,8 +1063,6 @@ def main():
         f"discord_reply_timeout = {DISCORD_REPLY_TIMEOUT_SEC}s",
         file=sys.stderr,
     )
-    if os.environ.get("EVEN_PREWARM", "1") == "1":
-        prewarm()
     ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
 
 

@@ -252,6 +252,32 @@ class TerminalCandidateTest(unittest.TestCase):
 
 
 class DiscordReplyTest(unittest.TestCase):
+    @patch.object(even_g2_bridge, "send_terminal_message")
+    @patch.object(even_g2_bridge, "terminal_session_summary")
+    def test_web_post_continues_the_selected_web_session(
+        self,
+        mock_summary,
+        mock_send_terminal_message,
+    ):
+        mock_summary.return_value = {
+            "id": "web-session-1",
+            "platform": "web",
+        }
+        mock_send_terminal_message.return_value = {"ok": True}
+
+        result = even_g2_bridge.post_terminal_session_message(
+            {"session_id": "web-session-1", "text": "続きをお願いします"}
+        )
+
+        self.assertEqual(result, {"ok": True})
+        mock_send_terminal_message.assert_called_once_with(
+            {
+                "appSessionId": "web-session-1",
+                "source": "even-g2",
+                "text": "続きをお願いします",
+            }
+        )
+
     @patch.object(even_g2_bridge, "discord_request")
     def test_adds_and_removes_processing_reaction(self, mock_discord_request):
         even_g2_bridge.discord_add_reaction(
@@ -277,83 +303,71 @@ class DiscordReplyTest(unittest.TestCase):
             ],
         )
 
-    @patch.object(even_g2_bridge, "discord_add_reaction")
     @patch.object(even_g2_bridge.threading, "Thread")
-    @patch.object(even_g2_bridge, "discord_send_message")
     @patch.object(even_g2_bridge, "terminal_session_summary")
-    def test_adds_processing_reaction_before_starting_worker(
+    def test_starts_worker_for_the_selected_discord_session(
         self,
         mock_summary,
-        mock_send,
         mock_thread,
-        mock_add_reaction,
     ):
         mock_summary.return_value = {
             "id": "session-1",
             "platform": "discord",
             "contextKey": "123456789012345678",
         }
-        mock_send.return_value = {"id": "123456789012345679"}
-
         result = even_g2_bridge.post_terminal_session_message(
             {"session_id": "session-1", "text": "長い作業をして"}
         )
 
-        mock_send.assert_called_once_with(
-            "123456789012345678",
-            "G2 User: 長い作業をして",
-        )
-        mock_add_reaction.assert_called_once_with(
-            "123456789012345678",
-            "123456789012345679",
-            "👀",
-        )
         mock_thread.assert_called_once_with(
             target=even_g2_bridge.discord_reply_worker,
             args=(
                 result["reply_job_id"],
-                "123456789012345678",
+                "session-1",
                 "長い作業をして",
-                "123456789012345679",
-                "👀",
             ),
             daemon=True,
         )
         mock_thread.return_value.start.assert_called_once_with()
 
     @patch.object(even_g2_bridge, "set_reply_job")
-    @patch.object(even_g2_bridge, "discord_remove_reaction")
-    @patch.object(even_g2_bridge, "discord_send_message")
-    @patch.object(even_g2_bridge, "ask_xangi_with_retry", return_value="完了しました")
-    def test_worker_removes_reaction_after_posting_final_reply(
+    @patch.object(
+        even_g2_bridge,
+        "continue_discord_session",
+        return_value={"ok": True, "response": "完了しました"},
+    )
+    def test_worker_continues_the_selected_discord_session(
         self,
-        _mock_ask,
-        mock_send,
-        mock_remove_reaction,
+        mock_continue,
         mock_set_job,
     ):
-        mock_send.return_value = {"id": "123456789012345680"}
-
         even_g2_bridge.discord_reply_worker(
             "job-1",
-            "123456789012345678",
+            "session-1",
             "長い作業をして",
-            "123456789012345679",
-            "👀",
         )
 
-        mock_send.assert_called_once_with(
-            "123456789012345678",
-            "完了しました",
-            reply_to_message_id="123456789012345679",
-        )
-        mock_remove_reaction.assert_called_once_with(
-            "123456789012345678",
-            "123456789012345679",
-            "👀",
-        )
+        mock_continue.assert_called_once_with("session-1", "長い作業をして")
         self.assertEqual(mock_set_job.call_args_list[0], unittest.mock.call("job-1", status="running"))
         self.assertEqual(mock_set_job.call_args_list[-1].kwargs["status"], "done")
+        self.assertEqual(
+            mock_set_job.call_args_list[-1].kwargs["reply"],
+            {"content": "完了しました"},
+        )
+
+    @patch.object(even_g2_bridge, "request_json")
+    def test_discord_continue_uses_the_selected_session_id(self, mock_request_json):
+        mock_request_json.return_value = {"ok": True, "response": "続きの回答"}
+
+        result = even_g2_bridge.continue_discord_session("session/1", "続きをお願いします")
+
+        self.assertEqual(result["response"], "続きの回答")
+        mock_request_json.assert_called_once_with(
+            "POST",
+            "/api/sessions/session%2F1/discord-continue",
+            {"message": "続きをお願いします"},
+            timeout=even_g2_bridge.DISCORD_REPLY_TIMEOUT_SEC,
+        )
 
 
 if __name__ == "__main__":
