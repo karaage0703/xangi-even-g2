@@ -251,7 +251,7 @@ Even Hub の beta / prototype install flow で `.ehpk` をインストールし�
 - 確認画面でダブルタップ: 破棄
 - セッション画面でダブルタップ: セッション一覧へ戻る
 
-Discord セッションへ投稿する場合、投稿は xangi の Discord bridge 経由になります。Discord bot token では人間アカウントを impersonate できないため、G2 からの投稿だと分かる表示になります。
+送信先は開いているセッションのplatformを維持します。Discord セッションは同じDiscord会話をxangiのremote input経路で継続し、Webセッションは同じWebセッションを継続します。返信完了後は同じセッションの履歴を再取得してG2表示へ反映します。
 
 ## 10. トラブルシュート
 

@@ -52,7 +52,7 @@ Important values:
 - `EVEN_BRIDGE_HOST`: use `0.0.0.0` for Tailscale direct HTTP; `127.0.0.1` is enough when publishing with Tailscale Serve
 - `EVEN_MAX_CHARS`: short root-compatible response limit. Terminal history display does not use this limit
 - `EVEN_HISTORY_MESSAGE_MAX_CHARS`: per-message limit sent to G2 history. The app performs pixel-based pagination
-- `EVEN_DISCORD_REPLY_TIMEOUT_SEC`: Max seconds to wait for the final xangi reply after a G2 post to a Discord session. The HTTP request returns first; the Discord reply is posted asynchronously.
+- `EVEN_DISCORD_REPLY_TIMEOUT_SEC`: Max seconds to wait while xangi remote input continues the selected Discord session. The HTTP request to G2 returns first, and completion is retrieved asynchronously.
 - `EVEN_DISCORD_REPLY_JOB_TTL_SEC`: How long async Discord replies remain available for G2 app polling
 - `EVEN_STT_MODEL`: `medium` is the recommended default for Japanese accuracy; use `base` if memory is tight
 

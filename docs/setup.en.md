@@ -243,9 +243,10 @@ Controls:
   - Double tap on confirmation: discard
   - Double tap on the session screen: return to the session list
 
-Discord sessions are posted through the bridge using the configured xangi
-Discord integration. Posts are labeled as coming from G2 because Discord bot
-tokens cannot impersonate the human account.
+The selected session keeps its platform when G2 sends a message. A Discord
+session continues the same Discord conversation through xangi remote input,
+while a Web session continues the same Web session. After the reply completes,
+the app reloads that session's history before updating the G2 display.
 
 ## 10. Troubleshooting
 

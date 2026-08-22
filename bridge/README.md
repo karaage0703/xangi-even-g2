@@ -52,7 +52,7 @@ EVEN_STT_LANG=ja
 - `EVEN_BRIDGE_HOST`: Tailscale direct HTTP なら `0.0.0.0`、Tailscale Serve で出すなら `127.0.0.1` でも可
 - `EVEN_MAX_CHARS`: root互換の短文応答上限。通常の terminal 履歴表示には使いません
 - `EVEN_HISTORY_MESSAGE_MAX_CHARS`: G2 履歴へ渡す1メッセージ上限。アプリ側で pixel pagination して読む前提です
-- `EVEN_DISCORD_REPLY_TIMEOUT_SEC`: G2 から Discord セッションへ投稿した後、xangi の最終回答を待つ上限秒数。HTTP応答は先に返し、Discord返信は非同期で投稿します。
+- `EVEN_DISCORD_REPLY_TIMEOUT_SEC`: 選択中の Discord セッションを xangi の remote input 経路で継続し、最終回答を待つ上限秒数。G2へのHTTP応答は先に返し、完了は非同期で取得します。
 - `EVEN_DISCORD_REPLY_JOB_TTL_SEC`: 非同期 Discord 返信を G2 アプリが取得できる保持時間
 - `EVEN_STT_MODEL`: 日本語精度優先なら `medium`、メモリを節約するなら `base`
 

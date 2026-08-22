@@ -26,6 +26,7 @@ import { mountUi, setStatus, setBody } from './ui'
 import { APP_BUILD_LABEL } from './version'
 import { G2_DISPLAY_HEIGHT, G2_DISPLAY_WIDTH, paginateText } from './paginate'
 import { candidateIndexForPage, virtualPageCount } from './history-pages'
+import { completeReply } from './reply-completion'
 import { clickGuardDeadline, shouldIgnoreSingleClick } from './click-guard'
 
 function waitForLaunchSource(
@@ -537,34 +538,61 @@ function addAssistantHistory(content: string) {
   })
 }
 
-function startReplyPolling(jobId: string) {
+function isCurrentTerminalSession(sessionId: string): boolean {
+  return terminalSession?.session_id === sessionId
+}
+
+async function syncCurrentTerminalHistory(sessionId: string): Promise<boolean> {
+  if (!isCurrentTerminalSession(sessionId)) return false
+  const detail = await getTerminalSessionDetail(sessionId, HISTORY_BATCH_SIZE)
+  if (!isCurrentTerminalSession(sessionId)) return false
+  if (detail.messages.at(-1)?.role !== 'assistant') return false
+  applyHistoryWindow(detail, 'latest')
+  return true
+}
+
+function startReplyPolling(jobId: string, sessionId: string) {
   if (!jobId || replyPolls.has(jobId)) return
   const startedAt = Date.now()
   const timer = window.setInterval(async () => {
     try {
       const result = await getTerminalReply(jobId)
       if (result.status === 'done' && result.reply?.content) {
+        if (replyPolls.get(jobId) !== timer) return
         window.clearInterval(timer)
         replyPolls.delete(jobId)
-        addAssistantHistory(result.reply.content)
-        if (viewMode === 'terminal') {
-          renderTerminalIdle()
-          void refreshReplyCandidates()
-        }
+        void completeReply(result.reply.content, {
+          isCurrentSession: () => isCurrentTerminalSession(sessionId),
+          showReply: content => {
+            addAssistantHistory(content)
+            if (viewMode === 'terminal') renderTerminalIdle()
+          },
+          syncHistory: () => syncCurrentTerminalHistory(sessionId),
+          renderSyncedHistory: () => {
+            if (viewMode === 'terminal') renderTerminalIdle()
+          },
+          refreshCandidates: refreshReplyCandidates,
+          onSyncError: error => console.error('Failed to synchronize completed reply', error),
+        })
       } else if (result.status === 'error' || result.status === 'expired') {
+        if (replyPolls.get(jobId) !== timer) return
         window.clearInterval(timer)
         replyPolls.delete(jobId)
-        addAssistantHistory(
-          result.reply?.content || result.error || 'Discord返信の取得に失敗しました',
-        )
-        if (viewMode === 'terminal') renderTerminalIdle()
+        if (isCurrentTerminalSession(sessionId)) {
+          addAssistantHistory(
+            result.reply?.content || result.error || 'Discord返信の取得に失敗しました',
+          )
+          if (viewMode === 'terminal') renderTerminalIdle()
+        }
       }
     } catch (err) {
       if (Date.now() - startedAt > 60_000) {
         window.clearInterval(timer)
         replyPolls.delete(jobId)
-        addAssistantHistory(`Discord返信の確認に失敗: ${(err as Error)?.message ?? err}`)
-        if (viewMode === 'terminal') renderTerminalIdle()
+        if (isCurrentTerminalSession(sessionId)) {
+          addAssistantHistory(`Discord返信の確認に失敗: ${(err as Error)?.message ?? err}`)
+          if (viewMode === 'terminal') renderTerminalIdle()
+        }
       }
     }
   }, 3_000)
@@ -803,6 +831,7 @@ async function sendTextToTerminal(text: string) {
     await toReady()
     return
   }
+  const sessionId = terminalSession.session_id
   try {
     appendLatestHistory({
       id: `local-${Date.now()}`,
@@ -820,14 +849,14 @@ async function sendTextToTerminal(text: string) {
         await refreshReplyCandidates()
         return
       } else if (result?.reply_job_id) {
-        startReplyPolling(result.reply_job_id)
+        startReplyPolling(result.reply_job_id, sessionId)
       }
       render(`応答を処理中…\n${question}`)
       await toReady()
       return
     }
     render(`Q: ${question}\n\n考え中…`)
-    await postTerminalSessionMessage(terminalSession.session_id, question)
+    await postTerminalSessionMessage(sessionId, question)
   } catch (err) {
     render(`エラー: ${(err as Error)?.message ?? err}\nタップで再試行。`)
     await toReady()
