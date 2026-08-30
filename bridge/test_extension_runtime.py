@@ -18,7 +18,10 @@ ROOT = Path(__file__).resolve().parent.parent
 class ExtensionRuntimeUnitTest(unittest.TestCase):
     def test_manifest_setup_skill_and_update_contract(self):
         manifest = json.loads((ROOT / "xangi-extension.json").read_text(encoding="utf-8"))
+        package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["schemaVersion"], 2)
+        self.assertEqual(manifest["displayName"], "xangi-even-g2")
+        self.assertEqual(manifest["version"], package["version"])
         self.assertEqual(manifest["runtime"], {"kind": "managed-http"})
         self.assertEqual(manifest["entrypoint"], "scripts/xangi-extension")
         self.assertEqual(
