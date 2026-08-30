@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+repo_dir=$(CDPATH= cd -- "$script_dir/.." && pwd)
+python_bin="$repo_dir/bridge/.venv/bin/python"
+
+if [ ! -x "$python_bin" ]; then
+  echo "bridge/.venv is missing; run 'cd bridge && uv sync' first" >&2
+  exit 1
+fi
+
+exec "$python_bin" "$repo_dir/bridge/extension_runtime.py" "$@"

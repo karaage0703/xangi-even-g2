@@ -10,11 +10,12 @@ Even Realities G2 から [xangi](https://github.com/karaage0703/xangi) を使う
 
 - G2 の表示で xangi の Web / Discord / Slack セッション一覧を見る
 - G2 から新しい xangi Web セッションを作る
-- G2 のマイク音声をタップ操作で録音する
+- G2 のマイク音声を長押し中に録音し、指を離して送信する
 - ローカル Whisper STT サーバーで音声を文字起こしする
 - 文字起こし結果を送信前に確認する
 - 会話本文を先に表示し、xangi が生成した回答候補を最新回答の末尾に続く追加ページへ自動表示する
-- タップですぐ音声入力を始める
+- 長押しで音声入力を始め、指を離して文字起こし確認へ進む
+- 従来の「タップで録音開始→再タップで停止」も使える
 - 選択中の xangi セッションへ投稿する
 - Discord の通常チャンネルとスレッドを名前付きで区別して表示する
 - xangi の応答と履歴を G2 に表示する
@@ -37,6 +38,12 @@ G2 マイク音声
 
 bridge は薄い中継サーバーです。xangi 本体の改造は不要です。
 
+bridge と Whisper STT は、`xangi-extension.json` を使って xangi の
+Managed Extension としても起動できます。この場合、子プロセスの起動・停止と
+xangi Web URL の受け渡しはxangiが管理します。現時点でG2アプリは従来どおり
+Tailnetからbridgeのlistenerへ直接接続します。手順は [XANGI_SETUP.md](XANGI_SETUP.md) を
+参照してください。
+
 ## 推奨ネットワーク
 
 個人利用では Tailscale を推奨します。
@@ -50,19 +57,26 @@ bridge は薄い中継サーバーです。xangi 本体の改造は不要です�
 
 詳しい手順は [docs/setup.md](docs/setup.md) を参照してください。
 
-### xangi workspace の skill として使う
+### xangi Managed Extensionとして使う
 
-xangi workspace で使う場合は、既存の `skills/` ディレクトリへ移動して、このリポジトリを clone します。
+xangi workspaceの外にrepositoryをcloneし、Managed Extensionとして登録します。
 
 ```bash
-cd /path/to/xangi-workspace/skills
-git clone https://github.com/karaage0703/xangi-even-g2.git xangi-even-g2
+git clone https://github.com/karaage0703/xangi-even-g2.git
+cd xangi-even-g2
+cd bridge && uv sync --frozen && cp .env.example .env && cd ..
+xangi extension link ./xangi-extension.json
+xangi extension start xangi-even-g2
+xangi extension doctor xangi-even-g2
 ```
 
-clone 後、xangi に以下のように依頼できます。
+AI向けskillは`skills/xs-xangi-even-g2/SKILL.md`に同梱されています。setup会話で
+workspace側の同名skillとの差分を確認し、承認後に追加・更新します。
+
+セットアップ後、xangi に以下のように依頼できます。
 
 ```text
-xangi-even-g2 スキルを使って、このマシンで Even G2 bridge / STT をセットアップして。Tailscale で iPhone から接続できるところまで確認して。
+xs-xangi-even-g2 スキルを使って、このマシンで Even G2 bridge / STT をセットアップして。Tailscale で iPhone から接続できるところまで確認して。
 ```
 
 ### 手動セットアップ

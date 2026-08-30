@@ -28,6 +28,7 @@ import { G2_DISPLAY_HEIGHT, G2_DISPLAY_WIDTH, paginateText } from './paginate'
 import { candidateIndexForPage, virtualPageCount } from './history-pages'
 import { completeReply } from './reply-completion'
 import { clickGuardDeadline, shouldIgnoreSingleClick } from './click-guard'
+import { longPressAction, recordingPrompt, type RecordingMode } from './recording-gesture'
 
 function waitForLaunchSource(
   bridge: { onLaunchSource(callback: (source: string) => void): () => void },
@@ -67,8 +68,8 @@ if (launchSource === 'appMenu') {
 const PROMPT = bridgeConfigured()
   ? `${APP_BUILD_LABEL}\nセッション読込中…`
   : `${APP_BUILD_LABEL}\nBridge URL 未設定\niPhone側の画面でURLを入力して保存してください。`
-const RECORDING = '録音中… 話してください。\nもう一度タップで送信。'
 const AUTO_HIDE_MS = 30_000
+const LISTENING_ANIMATION_MS = 400
 const SESSION_REFRESH_MS = 5_000
 const DOUBLE_TAP_NAV_DELAY_MS = 350
 const GESTURE_COLLISION_GUARD_MS = 700
@@ -188,6 +189,10 @@ type State = 'ready' | 'recording' | 'thinking' | 'confirming'
 type ViewMode = 'sessions' | 'terminal'
 
 let state: State = 'ready'
+let recordingMode: RecordingMode = null
+let audioStartPromise: Promise<boolean> | null = null
+let listeningAnimationTimer: number | null = null
+let listeningAnimationFrame = 0
 let viewMode: ViewMode = 'sessions'
 let chunks: Uint8Array[] = []
 let bufLen = 0
@@ -209,6 +214,25 @@ let replyCandidates: TerminalCandidate[] = []
 const replyPolls = new Map<string, number>()
 const HISTORY_BATCH_SIZE = 30
 
+function stopListeningAnimation() {
+  if (listeningAnimationTimer === null) return
+  window.clearInterval(listeningAnimationTimer)
+  listeningAnimationTimer = null
+}
+
+function startListeningAnimation() {
+  stopListeningAnimation()
+  listeningAnimationFrame = 0
+  listeningAnimationTimer = window.setInterval(() => {
+    if (state !== 'recording' || recordingMode !== 'hold') {
+      stopListeningAnimation()
+      return
+    }
+    listeningAnimationFrame += 1
+    render(recordingPrompt('hold', listeningAnimationFrame))
+  }, LISTENING_ANIMATION_MS)
+}
+
 function appendPcm(chunk: Uint8Array) {
   if (state !== 'recording') return
   chunks.push(chunk)
@@ -228,6 +252,7 @@ function drainBuffer(): Uint8Array {
 }
 
 async function toReady() {
+  stopListeningAnimation()
   state = 'ready'
   await bridge.audioControl(false)
   setStatus('ready')
@@ -769,20 +794,30 @@ function selectSession(offset: number) {
   render(formatSessionList())
 }
 
-async function startRecording() {
+async function startRecording(mode: Exclude<RecordingMode, null> = 'tap') {
   if (state !== 'ready' || viewMode !== 'terminal') return
   chunks = []
   bufLen = 0
   state = 'recording'
-  await bridge.audioControl(true)
+  recordingMode = mode
   setStatus('recording')
-  render(RECORDING)
+  render(recordingPrompt(mode))
+  if (mode === 'hold') startListeningAnimation()
+  const startPromise = bridge.audioControl(true)
+  audioStartPromise = startPromise
+  await startPromise
+  if (audioStartPromise === startPromise) audioStartPromise = null
+  if (state !== 'recording' || recordingMode !== mode) return
 }
 
 async function submit() {
   if (state !== 'recording') return
+  stopListeningAnimation()
+  const pendingAudioStart = audioStartPromise
   state = 'thinking'
+  recordingMode = null
   setStatus('thinking')
+  if (pendingAudioStart) await pendingAudioStart
   await bridge.audioControl(false)
   if (bufLen === 0) {
     render('音声が入りませんでした。\nタップでもう一度録音。')
@@ -881,11 +916,24 @@ function onSingleClick() {
     if (candidate) {
       ignoreSingleClickUntil = clickGuardDeadline(Date.now(), GESTURE_COLLISION_GUARD_MS)
       void sendTextToTerminal(candidate.text)
-    } else void startRecording()
+    } else void startRecording('tap')
   } else if (state === 'recording') {
     void submit()
   } else if (state === 'confirming') {
     void sendPendingQuestion()
+  }
+}
+
+function onLongPress(phase: 'start' | 'release') {
+  const action = longPressAction(phase, state, viewMode, recordingMode)
+  if (action === 'start-hold') {
+    void startRecording('hold')
+  } else if (action === 'adopt-hold') {
+    recordingMode = 'hold'
+    render(recordingPrompt('hold'))
+    startListeningAnimation()
+  } else if (action === 'submit') {
+    void submit()
   }
 }
 
@@ -925,6 +973,7 @@ function cleanup() {
   eventSource?.close()
   stopSessionRefresh()
   cancelPendingTerminalExit()
+  stopListeningAnimation()
   for (const timer of replyPolls.values()) window.clearInterval(timer)
   replyPolls.clear()
   if (hideTimer !== null) window.clearTimeout(hideTimer)
@@ -948,6 +997,25 @@ const unsubscribe = bridge.onEvenHubEvent(event => {
 
   const sysType = envelopeType(event.sysEvent)
   const textType = envelopeType(event.textEvent)
+  const listType = envelopeType(event.listEvent)
+
+  if (
+    sysType === OsEventTypeList.LONG_PRESS_EVENT ||
+    textType === OsEventTypeList.LONG_PRESS_EVENT ||
+    listType === OsEventTypeList.LONG_PRESS_EVENT
+  ) {
+    onLongPress('start')
+    return
+  }
+
+  if (
+    sysType === OsEventTypeList.LONG_PRESS_RELEASE_EVENT ||
+    textType === OsEventTypeList.LONG_PRESS_RELEASE_EVENT ||
+    listType === OsEventTypeList.LONG_PRESS_RELEASE_EVENT
+  ) {
+    onLongPress('release')
+    return
+  }
 
   if (
     sysType === OsEventTypeList.SCROLL_TOP_EVENT ||
