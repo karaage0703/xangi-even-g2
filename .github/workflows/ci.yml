@@ -45,7 +45,10 @@ jobs:
           python-version: "3.12"
 
       - name: Run bridge tests
-        run: python -m unittest bridge/test_even_g2_bridge.py
+        run: python -m unittest bridge/test_even_g2_bridge.py bridge/test_extension_runtime.py bridge/test_prepare_update.py
 
       - name: Check bridge syntax
-        run: python -m py_compile bridge/even_g2_bridge.py
+        run: python -m py_compile bridge/even_g2_bridge.py bridge/extension_runtime.py bridge/stt_server.py
+
+      - name: Check extension entrypoint syntax
+        run: sh -n scripts/xangi-extension scripts/prepare-update

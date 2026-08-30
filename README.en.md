@@ -12,10 +12,11 @@ Tailscale, the same style as a personal xangi deployment.
 
 - Shows xangi Web / Discord / Slack sessions on the G2 display
 - Creates a new xangi Web session from the glasses
-- Records G2 microphone audio with tap-to-start / tap-to-stop
+- Records G2 microphone audio while holding, then stops on release
 - Transcribes audio through a local Whisper server
 - Shows the conversation first and automatically adds xangi-generated reply suggestions as an extra page after the latest reply
-- Starts voice input immediately when the user taps
+- Starts voice input on long press and shows the transcription confirmation on release
+- Keeps tap-to-start / tap-to-stop as a compatible alternative
 - Posts the transcribed text to the selected xangi session
 - Shows xangi replies and session history on the glasses
 - Shows the build label on both the iPhone companion screen and G2 display
@@ -37,6 +38,12 @@ G2 microphone audio
 
 The bridge is intentionally thin. xangi itself is not modified.
 
+The bridge and Whisper STT service can also run as a xangi Managed Extension
+through `xangi-extension.json`. xangi then owns the child process lifecycle and
+passes its Web URL to the bridge automatically. The G2 app currently continues
+to connect directly to the bridge's Tailnet-facing listener. See
+[XANGI_SETUP.en.md](XANGI_SETUP.en.md).
+
 ## Recommended Network Model
 
 For personal use and GitHub-based distribution, use Tailscale.
@@ -55,19 +62,27 @@ target.
 
 See [docs/setup.en.md](docs/setup.en.md) for the full xangi + Even G2 setup.
 
-### Use As A xangi Workspace Skill
+### Use As A xangi Managed Extension
 
-In a xangi workspace, move to the existing `skills/` directory and clone this repository there.
+Clone the repository outside the xangi workspace and register it as a Managed Extension.
 
 ```bash
-cd /path/to/xangi-workspace/skills
-git clone https://github.com/karaage0703/xangi-even-g2.git xangi-even-g2
+git clone https://github.com/karaage0703/xangi-even-g2.git
+cd xangi-even-g2
+cd bridge && uv sync --frozen && cp .env.example .env && cd ..
+xangi extension link ./xangi-extension.json
+xangi extension start xangi-even-g2
+xangi extension doctor xangi-even-g2
 ```
+
+The bundled AI skill lives at `skills/xs-xangi-even-g2/SKILL.md`. During setup,
+compare it with the same-name workspace skill and add or update it only after
+separate approval.
 
 Then ask xangi:
 
 ```text
-Use the xangi-even-g2 skill to set up the Even G2 bridge and STT on this machine. Verify that the iPhone can connect through Tailscale.
+Use the xs-xangi-even-g2 skill to set up the Even G2 bridge and STT on this machine. Verify that the iPhone can connect through Tailscale.
 ```
 
 ### Manual Setup

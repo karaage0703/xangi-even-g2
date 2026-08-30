@@ -237,7 +237,9 @@ Controls:
   - Up/down scroll: move through history/pages; adjacent history loads in batches of 30
   - Moving before the first page wraps to the latest page; moving after the final page wraps to the first page
   - Show xangi-generated reply suggestions as an extra page after the latest reply; fixed fallback suggestions are not shown
-  - Tap: start recording
+  - Long press: record while held
+  - Release: stop recording and show transcription confirmation
+  - Tap: start recording with the compatible tap workflow
   - Tap again: stop recording and show transcription confirmation
   - Tap on confirmation: send
   - Double tap on confirmation: discard
