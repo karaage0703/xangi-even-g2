@@ -51,3 +51,9 @@ bridgeだけを起動し、外部STT endpointまたはcommandを使う場合は
 repository管理Extensionの更新では、manifestの`update.prepare`が
 `bridge/uv.lock`どおりに`uv sync --frozen`を実行します。更新後は`status`と
 `doctor`を再確認し、必要なら同梱skillの実質差分を別途提案します。
+
+## ログ
+
+Managed Extensionのbridge/STTログはworkspaceの`.xangi/logs/xangi-even-g2/bridge.log`と`stt.log`へ保存します。各5 MiB、過去3世代を保持します。音声受信・認識完了・HTTP応答書込を記録し、文字起こし本文は保存しません。HTTP応答書込はG2画面への表示成功を保証しません。
+
+モデルは`bridge/.env`の`EVEN_STT_MODEL`で指定します。親プロセスの同名環境変数がある場合はそちらが優先されます。変更はEven G2拡張の再起動後に有効です。

@@ -52,6 +52,20 @@ class ExtensionRuntimeUnitTest(unittest.TestCase):
         self.assertTrue(is_enabled("yes"))
         self.assertFalse(is_enabled("false"))
 
+    def test_child_stderr_is_persisted_and_appended_across_runs(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            script = root / "child.py"
+            script.write_text("import sys; print('received bytes=32000', file=sys.stderr)\n")
+            for _ in range(2):
+                runtime = Runtime(root, root, {})
+                child = runtime.start_logged_child("stt", script, dict(os.environ))
+                self.assertEqual(child.wait(timeout=5), 0)
+                runtime.stop()
+            log = root / ".xangi/logs/xangi-even-g2/stt.log"
+            self.assertEqual(log.read_text().count("received bytes=32000"), 2)
+            self.assertEqual(log.stat().st_mode & 0o777, 0o600)
+
     def test_requires_token_for_non_loopback_bridge(self):
         runtime = Runtime(
             ROOT,

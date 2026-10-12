@@ -55,3 +55,9 @@ After initial setup or an Extension update, compare the bundled
 For a repository-managed Extension update, the manifest's `update.prepare`
 runs `uv sync --frozen` against `bridge/uv.lock`. Recheck `status` and `doctor`
 after the update, then propose any material bundled-skill changes separately.
+
+## Logs
+
+Managed bridge/STT logs are stored under the workspace at `.xangi/logs/xangi-even-g2/bridge.log` and `stt.log`, each with a 5 MiB limit and three backups. They record audio receipt, transcription completion and HTTP response writes, without transcript text. A successful response write does not confirm display on G2.
+
+Set the model with `EVEN_STT_MODEL` in `bridge/.env`. A variable inherited from the parent process takes precedence. Restart the Even G2 extension to apply a model change.

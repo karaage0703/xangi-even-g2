@@ -968,14 +968,17 @@ class Handler(BaseHTTPRequestHandler):
         # STT エンドポイント: body は生 PCM (s16le 16kHz mono)、応答は {"text": ...}
         if self.path.rstrip("/").endswith("/stt"):
             try:
+                started = time.monotonic()
+                print(f"[bridge] STT received bytes={len(raw)}", file=sys.stderr, flush=True)
                 text = transcribe_pcm(raw)
             except Exception as e:  # noqa: BLE001
                 self._err(500, f"stt error: {e}")
                 return
             print(
-                f"[bridge] STT {len(raw)}B -> {text[:60]!r}", file=sys.stderr
+                f"[bridge] STT completed bytes={len(raw)} elapsed={time.monotonic()-started:.2f} text_chars={len(text)}", file=sys.stderr
             )
             self._send(200, json.dumps({"text": text}, ensure_ascii=False).encode())
+            print("[bridge] STT response written status=200", file=sys.stderr, flush=True)
             return
 
         try:

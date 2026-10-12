@@ -95,12 +95,15 @@ class Handler(BaseHTTPRequestHandler):
             length = 0
         raw = self.rfile.read(length) if length > 0 else b""
         try:
+            started = time.monotonic()
+            print(f"[stt] received bytes={len(raw)}; transcription starting", file=sys.stderr, flush=True)
             text = transcribe(raw)
         except Exception as e:  # noqa: BLE001
+            print(f"[stt] failed: {e}", file=sys.stderr, flush=True)
             self._send(500, {"error": str(e)})
             return
         secs = len(raw) / 2 / RATE if raw else 0
-        print(f"[stt] {len(raw)}B (~{secs:.1f}s) -> {text[:60]!r}", file=sys.stderr)
+        print(f"[stt] completed bytes={len(raw)} audio_seconds={secs:.1f} elapsed={time.monotonic()-started:.2f} text_chars={len(text)}", file=sys.stderr, flush=True)
         self._send(200, {"text": text})
 
 

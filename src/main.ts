@@ -254,7 +254,8 @@ function drainBuffer(): Uint8Array {
 async function toReady() {
   stopListeningAnimation()
   state = 'ready'
-  await bridge.audioControl(false)
+  // Recording is stopped by submit/showSessionList. A second device round trip
+  // must not block a completed reply from reaching the display.
   setStatus('ready')
   scheduleAutoHide()
   flushRender()
@@ -681,12 +682,15 @@ function startSessionRefresh() {
 }
 
 function connectEvents(session: TerminalSession) {
+  const isCurrent = () => viewMode === 'terminal' && terminalSession?.session_id === session.session_id
   eventSource?.close()
   eventSource = new EventSource(terminalEventsUrl(session))
   eventSource.addEventListener('ready', () => {
+    if (!isCurrent()) return
     setStatus(state === 'confirming' ? 'ready' : state)
   })
   eventSource.onmessage = event => {
+    if (!isCurrent()) return
     try {
       const payload = JSON.parse(event.data) as {
         type?: string
@@ -710,6 +714,7 @@ function connectEvents(session: TerminalSession) {
         })
         void (async () => {
           await toReady()
+          if (!isCurrent()) return
           renderTerminalIdle()
           await refreshReplyCandidates()
         })()
@@ -722,6 +727,7 @@ function connectEvents(session: TerminalSession) {
     }
   }
   eventSource.onerror = () => {
+    if (!isCurrent()) return
     setStatus('error')
   }
 }
@@ -734,22 +740,23 @@ async function openSelectedSession() {
   setStatus('thinking')
   render(`${selected.title}\n開いています…`)
   try {
-    const session =
-      selected.id === '__new__'
-        ? await createTerminalSession('Even G2 Terminal')
-        : await openTerminalSession(selected.id)
+    // Keep a new conversation local until the first confirmed message is sent.
+    const isDraft = selected.id === '__new__'
+    const session = isDraft ? null : await openTerminalSession(selected.id)
     terminalSession = session
-    terminalSummary =
-      selected.id === '__new__'
-        ? { id: session.session_id, title: 'Even G2 Terminal', platform: 'web' }
-        : selected
+    terminalSummary = isDraft
+      ? { id: '__new__', title: 'New Session', platform: 'web' }
+      : selected
     viewMode = 'terminal'
-    await loadTerminalHistory(session.session_id)
-    if (!terminalSummary.platform || terminalSummary.platform === 'web') {
-      connectEvents(session)
-    } else {
-      eventSource?.close()
-      eventSource = null
+    eventSource?.close()
+    eventSource = null
+    historyMessages = []
+    historyIndex = -1
+    historyStart = historyEnd = historyTotal = 0
+    replyCandidates = []
+    if (session) {
+      await loadTerminalHistory(session.session_id)
+      if (!terminalSummary.platform || terminalSummary.platform === 'web') connectEvents(session)
     }
     await toReady()
     renderTerminalIdle()
@@ -833,7 +840,7 @@ async function submit() {
       await toReady()
       return
     }
-    if (!terminalSession) {
+    if (!terminalSession && terminalSummary?.id !== '__new__') {
       render('セッションがありません。\nダブルタップで一覧へ。')
       await toReady()
       return
@@ -861,13 +868,19 @@ async function sendTextToTerminal(text: string) {
   if (!question) return
   state = 'thinking'
   setStatus('thinking')
-  if (!terminalSession) {
-    render('セッションがありません。\nダブルタップで一覧へ。')
-    await toReady()
-    return
-  }
-  const sessionId = terminalSession.session_id
   try {
+    if (!terminalSession && terminalSummary?.id === '__new__') {
+      const session = await createTerminalSession('Even G2 Terminal')
+      terminalSession = session
+      terminalSummary = { id: session.session_id, title: 'Even G2 Terminal', platform: 'web' }
+      connectEvents(session)
+    }
+    if (!terminalSession) {
+      render('セッションがありません。\nダブルタップで一覧へ。')
+      await toReady()
+      return
+    }
+    const sessionId = terminalSession.session_id
     appendLatestHistory({
       id: `local-${Date.now()}`,
       role: 'user',
@@ -886,8 +899,8 @@ async function sendTextToTerminal(text: string) {
       } else if (result?.reply_job_id) {
         startReplyPolling(result.reply_job_id, sessionId)
       }
-      render(`応答を処理中…\n${question}`)
       await toReady()
+      renderTerminalIdle()
       return
     }
     render(`Q: ${question}\n\n考え中…`)
