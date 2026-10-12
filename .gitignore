@@ -8,3 +8,5 @@ __pycache__/
 bridge/.env
 bridge/.session_id
 public/
+
+.xangi/

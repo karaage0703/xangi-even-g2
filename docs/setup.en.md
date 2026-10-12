@@ -225,30 +225,7 @@ The exact Even Hub UI can change, but the important checks are:
 
 ## 9. Use On G2
 
-Controls:
-
-- Session list
-  - Up/down scroll: select session
-  - Discord sessions show regular channels as `#channel-name` and threads as `T: thread-name`
-  - Tap: open selected session
-  - `+ New Session`: create a new Web session
-  - Double tap: exit
-- Session screen
-  - Up/down scroll: move through history/pages; adjacent history loads in batches of 30
-  - Moving before the first page wraps to the latest page; moving after the final page wraps to the first page
-  - Show xangi-generated reply suggestions as an extra page after the latest reply; fixed fallback suggestions are not shown
-  - Long press: record while held
-  - Release: stop recording and show transcription confirmation
-  - Tap: start recording with the compatible tap workflow
-  - Tap again: stop recording and show transcription confirmation
-  - Tap on confirmation: send
-  - Double tap on confirmation: discard
-  - Double tap on the session screen: return to the session list
-
-The selected session keeps its platform when G2 sends a message. A Discord
-session continues the same Discord conversation through xangi remote input,
-while a Web session continues the same Web session. After the reply completes,
-the app reloads that session's history before updating the G2 display.
+See [usage](usage.en.md) for controls.
 
 ## 10. Troubleshooting
 

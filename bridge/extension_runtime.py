@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
+from logging.handlers import RotatingFileHandler
 import os
 import signal
 import subprocess
@@ -57,6 +59,7 @@ class Runtime:
         self.repo_dir = repo_dir
         self.workspace = workspace
         self.environ = environ
+        self.log_threads: list[threading.Thread] = []
         self.bridge: subprocess.Popen[bytes] | None = None
         self.stt: subprocess.Popen[bytes] | None = None
         self.stt_enabled = is_enabled(environ.get("EVEN_EXTENSION_STT_ENABLED"))
@@ -73,19 +76,43 @@ class Runtime:
         host_url = child_env.get("XANGI_EXTENSION_HOST_URL", "").rstrip("/")
         if host_url:
             child_env["XANGI_BASE_URL"] = host_url
-        self.bridge = subprocess.Popen(
-            [sys.executable, str(bridge_dir / "even_g2_bridge.py")],
-            cwd=bridge_dir,
-            env=child_env,
-            stdout=subprocess.DEVNULL,
-        )
+        child_env["PYTHONUNBUFFERED"] = "1"
+        self.bridge = self.start_logged_child("bridge", bridge_dir / "even_g2_bridge.py", child_env)
         if self.stt_enabled:
-            self.stt = subprocess.Popen(
-                [sys.executable, str(bridge_dir / "stt_server.py")],
-                cwd=bridge_dir,
-                env=child_env,
-                stdout=subprocess.DEVNULL,
+            self.stt = self.start_logged_child("stt", bridge_dir / "stt_server.py", child_env)
+
+    def start_logged_child(self, name: str, script: Path, env: dict[str, str]) -> subprocess.Popen:
+        log_dir = self.workspace / ".xangi" / "logs" / EXTENSION_ID
+        log_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        log_path = log_dir / f"{name}.log"
+        fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        os.close(fd)
+        handler = RotatingFileHandler(log_path, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8")
+        handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+        try:
+            process = subprocess.Popen(
+                [sys.executable, str(script)], cwd=script.parent, env=env,
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
             )
+        except Exception:
+            handler.close()
+            raise
+
+        def save_logs() -> None:
+            try:
+                assert process.stderr is not None
+                for line in process.stderr:
+                    record = logging.LogRecord(name, logging.INFO, "", 0, line.decode("utf-8", "replace").rstrip(), (), None)
+                    handler.handle(record)
+            finally:
+                if process.stderr:
+                    process.stderr.close()
+                handler.close()
+
+        thread = threading.Thread(target=save_logs, daemon=True)
+        thread.start()
+        self.log_threads.append(thread)
+        return process
 
     @staticmethod
     def _running(process: subprocess.Popen[bytes] | None) -> bool:
@@ -150,6 +177,9 @@ class Runtime:
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=2)
+
+        for thread in self.log_threads:
+            thread.join(timeout=2)
 
 
 def serve(workspace: Path) -> None:
