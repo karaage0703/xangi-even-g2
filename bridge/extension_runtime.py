@@ -62,6 +62,7 @@ class Runtime:
         self.log_threads: list[threading.Thread] = []
         self.bridge: subprocess.Popen[bytes] | None = None
         self.stt: subprocess.Popen[bytes] | None = None
+        self.startup_state = "initializing"
         self.stt_enabled = is_enabled(environ.get("EVEN_EXTENSION_STT_ENABLED"))
 
     def start(self) -> None:
@@ -139,8 +140,15 @@ class Runtime:
             not self.stt_enabled
             or (self._running(self.stt) and bool(stt_health and stt_health.get("ok")))
         )
+        # Model initialization is independent of bridge/device connectivity.
+        if self.startup_state == "initializing":
+            if stt_ready:
+                self.startup_state = "complete"
+            elif self.stt is not None and self.stt.poll() is not None:
+                self.startup_state = "failed"
         ready = bridge_ready and stt_ready
         return {
+            "startup": {"state": self.startup_state},
             "ok": ready,
             "ready": ready,
             "detail": "ready" if ready else "bridge or speech-to-text service is warming up",

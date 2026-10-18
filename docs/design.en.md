@@ -50,3 +50,7 @@ The G2 app connects directly to the Tailnet-facing bridge listener, separate fro
 Connection settings are saved and loaded through companion localStorage and Even storage. Build-time defaults apply when saved values are absent. Normal builds do not embed tokens. Configured private builds contain secrets and must not be published.
 
 See [Extension operation](../XANGI_SETUP.en.md) and [setup](setup.en.md) for configuration, networking, and standalone operation.
+
+### Initialization group
+
+The manifest declares startup.exclusiveGroup=gpu and timeoutSeconds=120. Health startup.state is initializing while the STT model loads, complete after loading or when STT is disabled, and failed if the STT child exits before completion. Bridge/device connectivity does not hold this group once GPU initialization finishes. Older hosts ignore these additional fields.

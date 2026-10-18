@@ -81,3 +81,7 @@ Before distributing a build, keep these versions in sync:
 
 The current build label is visible on the companion screen and G2 display. Use
 it to verify that Even Hub installed the intended `.ehpk`.
+
+### Startup ordering
+
+Supporting xangi hosts serialize initialization within the default gpu group. Set `"startup": null` in the host extensions.json record to disable grouping for CPU-only operation or disabled STT. Separate GPUs can use different exclusiveGroup labels; configure actual devices separately. After timeout, inspect host status for the owner and blocking reason.

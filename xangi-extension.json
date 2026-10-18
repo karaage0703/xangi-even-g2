@@ -29,5 +29,9 @@
       "protocol": "http",
       "healthPath": "/health"
     }
-  ]
+  ],
+  "startup": {
+    "exclusiveGroup": "gpu",
+    "timeoutSeconds": 120
+  }
 }
