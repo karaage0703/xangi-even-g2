@@ -8,6 +8,7 @@ import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 from bridge.extension_runtime import Runtime, is_enabled, load_env_file
 
@@ -65,6 +66,35 @@ class ExtensionRuntimeUnitTest(unittest.TestCase):
             log = root / ".xangi/logs/xangi-even-g2/stt.log"
             self.assertEqual(log.read_text().count("received bytes=32000"), 2)
             self.assertEqual(log.stat().st_mode & 0o777, 0o600)
+
+    def test_startup_waits_for_model_not_device_or_bridge(self):
+        runtime = Runtime(ROOT, ROOT, {})
+        runtime.stt = Mock()
+        runtime.stt.poll.return_value = None
+        runtime.bridge = None
+        with patch("bridge.extension_runtime.probe_json", side_effect=[None, {"ok": True}]):
+            health = runtime.health()
+        self.assertFalse(health["ready"])
+        self.assertEqual(health["startup"], {"state": "complete"})
+        with patch("bridge.extension_runtime.probe_json", return_value=None):
+            self.assertEqual(runtime.health()["startup"], {"state": "complete"})
+
+    def test_startup_failure_is_terminal(self):
+        runtime = Runtime(ROOT, ROOT, {})
+        runtime.stt = Mock()
+        runtime.stt.poll.return_value = None
+        with patch("bridge.extension_runtime.probe_json", return_value=None):
+            self.assertEqual(runtime.health()["startup"], {"state": "initializing"})
+        runtime.stt.poll.return_value = 1
+        with patch("bridge.extension_runtime.probe_json", return_value=None):
+            self.assertEqual(runtime.health()["startup"], {"state": "failed"})
+
+    def test_disabled_stt_does_not_hold_initialization_group(self):
+        runtime = Runtime(ROOT, ROOT, {"EVEN_EXTENSION_STT_ENABLED": "false"})
+        with patch("bridge.extension_runtime.probe_json", return_value=None):
+            health = runtime.health()
+        self.assertFalse(health["ready"])
+        self.assertEqual(health["startup"], {"state": "complete"})
 
     def test_requires_token_for_non_loopback_bridge(self):
         runtime = Runtime(

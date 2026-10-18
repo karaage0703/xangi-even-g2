@@ -78,3 +78,7 @@ npm run pack:check
 - `package-lock.json`
 - `app.json`
 - `src/version.ts`
+
+### 起動順の設定
+
+対応するxangiでは、既定でgpuグループ内の初期化を直列化する。CPU運用やSTT無効時に不要ならホストのextensions.jsonの対象レコードで `"startup": null` を指定できる。別GPUを使う場合はexclusiveGroupのラベルを分け、実際のデバイス設定も別途合わせる。タイムアウト時はホストのstatusで所有元と待機理由を確認する。

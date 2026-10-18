@@ -50,3 +50,7 @@ G2アプリはTailnet向けbridge listenerへ直接接続します。Managed Ext
 接続設定はcompanionのlocalStorageとEven側ストレージを通して保存・読込します。保存設定がなければビルド時の初期値を参照します。通常のビルドにはtokenを埋め込みません。設定入りのprivate buildは秘密情報を含むため公開しないでください。
 
 設定・起動手順は[Extension運用](../XANGI_SETUP.md)、ネットワークと単体起動は[セットアップ](setup.md)を参照してください。
+
+### 初期化グループ
+
+manifestはstartup.exclusiveGroup=gpu、timeoutSeconds=120を宣言する。healthのstartup.stateはSTTモデル読み込み中initializing、読み込み完了またはSTT無効時complete、STT子プロセス終了時failed。bridgeやメガネの接続状態とは分離し、未接続でもGPU初期化完了後は次の拡張へ進める。旧ホストは追加フィールドを無視する。
