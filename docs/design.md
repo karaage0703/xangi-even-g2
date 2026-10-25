@@ -45,7 +45,11 @@ Discordの完了本文は履歴APIの再取得より先に表示します。履�
 
 ## 接続と設定
 
-G2アプリはTailnet向けbridge listenerへ直接接続します。Managed Extensionの管理用HTTP endpointとは別です。Managed runtimeは親xangiのWeb URLを受け取り、単体起動では`XANGI_BASE_URL`を使います。
+Managed Extensionでは、Bridge URLを`http://<xangi-host>:<xangi-port>/api/devices/xangi-even-g2`に設定します。この入口に対応したxangi本体が必要です。専用tokenは`EVEN_BRIDGE_TOKEN`（`DEVICE_BRIDGE_TOKEN`も利用可）を使います。bridgeとSTTはloopbackの自動割当ポートで起動し、設定済みのHOST/PORTは単体起動時だけ使います。内部ポートをcompanionへ設定しないでください。
+
+本体は端末tokenを管理用tokenと分けて拡張へ転送し、拡張で照合します。音声POSTとSSEは同じ入口を通ります。STTは外部へ公開しません。
+
+Even G2固有の本体経路ではなく、manifestの`deviceIngress`で選択する汎用の端末向け入口を使います。この拡張は`capability: device.even-g2`、`authentication: extension-bearer`を宣言します。
 
 接続設定はcompanionのlocalStorageとEven側ストレージを通して保存・読込します。保存設定がなければビルド時の初期値を参照します。通常のビルドにはtokenを埋め込みません。設定入りのprivate buildは秘密情報を含むため公開しないでください。
 

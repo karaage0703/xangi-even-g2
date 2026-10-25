@@ -29,16 +29,48 @@ xangi-managed Extension.
    both the bridge and STT are ready.
 4. Verify with `xangi extension list` that `xangi-even-g2` is registered for
    autostart.
-5. Keep the configured bridge URL in the Even Hub companion screen. The
-   Extension owns the bridge process, but the G2 client still reaches its
-   Tailnet-facing listener directly.
+5. For a Managed Extension, set Bridge URL to the short HTTPS URL described below. The internal upstream is `http://<xangi-host>:<xangi-port>/api/devices/xangi-even-g2`. The xangi host must support this ingress. Keep the dedicated `EVEN_BRIDGE_TOKEN` (`DEVICE_BRIDGE_TOKEN` is also accepted). Bridge and STT bind automatically allocated loopback ports; configured HOST/PORT values apply only to standalone operation. Do not enter internal ports in the companion.
 
-The previous PM2 bridge/STT processes and the Managed Extension cannot listen
-on the same ports simultaneously. Stop the old processes and verify that the
-ports are free before starting the Extension.
+Stop old PM2 processes after verifying migration. Existing port 8791 URLs must be changed to the shared ingress.
 
 Set `EVEN_EXTENSION_STT_ENABLED=false` to run only the bridge and use an
 external speech-to-text endpoint or command.
+
+## Connect using a short HTTPS URL (recommended)
+
+Connect your iPhone and the computer running xangi to the same Tailscale private network (tailnet). This setup allows access only from devices permitted by that network; it does not publish xangi on the internet. Keep Tailscale on while using G2. The G2 connection also requires your dedicated token.
+
+### Set up the xangi computer
+
+The commands below assume xangi runs locally at `http://127.0.0.1:18888`. If you use another port, replace `18888` throughout.
+
+**If you already open xangi over HTTP from another device, this changes its address to HTTPS.** Update bookmarks, iPhone Shortcuts and integration URLs too. If Tailscale is already configured on this computer, check the migration notes below before running the commands.
+
+```bash
+tailscale serve --bg --https=18888 http://127.0.0.1:18888
+tailscale serve --bg --https=18888 --set-path=/eveng2 http://127.0.0.1:18888/api/devices/xangi-even-g2
+```
+
+### Set up the iPhone
+
+Use the hostname printed by the commands above. In the companion app, save the following **Bridge URL** and your dedicated token:
+
+```text
+https://<your-machine>.<your-tailnet>.ts.net:18888/eveng2
+```
+
+Open xangi itself at the same URL without `/eveng2`. Use the hostname, not the `100.x.x.x` IP address, because the HTTPS certificate is issued for that hostname. Confirm that the G2 session list appears. Keep your token private.
+
+<details>
+<summary>Migration notes for an existing Tailscale setup</summary>
+
+Save and inspect `tailscale serve status --json` before changing an existing setup. If port 18888 has a `TCPForward` to `127.0.0.1:18888`, run `tailscale serve --tcp=18888 off` before the two setup commands above. Remote access is briefly unavailable during the switch. Local loopback HTTP remains unchanged.
+
+If port 18888 belongs to another service or is publicly exposed using Tailscale Funnel, do not overwrite it with these commands. Review that configuration first. Tailscale cannot give different paths on the same port different public/private exposure scopes. Other ports do not need changes for this setup.
+
+If you previously configured a separate G2 port or public G2 route, remove only that old route after confirming the new URL works. For an authentication check, G2 requests without a token should return HTTP 401. See [Tailscale Serve](https://tailscale.com/docs/features/tailscale-serve) for configuration details.
+
+</details>
 
 ## Add or update the workspace skill
 

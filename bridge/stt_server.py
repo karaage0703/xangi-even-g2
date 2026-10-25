@@ -25,7 +25,7 @@ import os
 import sys
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 
 import numpy as np
 import torch
@@ -113,7 +113,9 @@ def main():
         f"[stt] listening on {HOST}:{PORT} (model={MODEL_NAME}, device={DEVICE})",
         file=sys.stderr,
     )
-    ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
+    from managed_listener import create_server
+
+    create_server(HOST, PORT, Handler).serve_forever()
 
 
 if __name__ == "__main__":

@@ -1,5 +1,11 @@
 # xangi + Even G2 Setup
 
+For standard personal use, follow the [Managed Extension short HTTPS setup](../XANGI_SETUP.en.md#connect-using-a-short-https-url-recommended), using tailnet-only Serve and your own dedicated token.
+
+For a Managed Extension, set Bridge URL to `http://<xangi-host>:<xangi-port>/api/devices/xangi-even-g2`. The xangi host must support this ingress. Keep the dedicated `EVEN_BRIDGE_TOKEN` (`DEVICE_BRIDGE_TOKEN` is also accepted). Bridge and STT bind automatically allocated loopback ports; configured HOST/PORT values apply only to standalone operation. Do not enter internal ports in the companion.
+
+The fixed-port and PM2 instructions below describe standalone operation. For Managed Extension setup, see XANGI_SETUP.en.md at the repository root.
+
 This guide sets up xangi for Even Realities G2 with a private Tailscale network.
 
 The target is GitHub-based installation, not public Store distribution.

@@ -28,7 +28,7 @@ import urllib.request
 import urllib.error
 import urllib.parse
 import wave
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 
 TOKEN = os.environ.get("EVEN_BRIDGE_TOKEN", "").strip()
 PORT = int(os.environ.get("EVEN_BRIDGE_PORT", "8791"))
@@ -1066,7 +1066,9 @@ def main():
         f"discord_reply_timeout = {DISCORD_REPLY_TIMEOUT_SEC}s",
         file=sys.stderr,
     )
-    ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
+    from managed_listener import create_server
+
+    create_server(HOST, PORT, Handler).serve_forever()
 
 
 if __name__ == "__main__":
