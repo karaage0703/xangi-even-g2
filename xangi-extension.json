@@ -4,12 +4,12 @@
   "displayName": "xangi-even-g2",
   "description": "Runs the Even G2 bridge and local speech-to-text service under xangi.",
   "permissions": [
-    "listen for Even G2 requests on the configured bridge address",
+    "accept authenticated Even G2 requests through the parent xangi device ingress",
     "connect to the parent xangi Web API",
     "run a local Whisper speech-to-text model",
     "read bridge/.env for local Even G2 settings"
   ],
-  "version": "0.1.25",
+  "version": "0.1.24",
   "entrypoint": "scripts/xangi-extension",
   "runtime": {
     "kind": "managed-http"
@@ -33,5 +33,9 @@
   "startup": {
     "exclusiveGroup": "gpu",
     "timeoutSeconds": 120
+  },
+  "deviceIngress": {
+    "capability": "device.even-g2",
+    "authentication": "extension-bearer"
   }
 }

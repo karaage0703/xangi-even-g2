@@ -4,19 +4,22 @@
 from __future__ import annotations
 
 import argparse
+import hmac
+import http.client
 import json
 import logging
-from logging.handlers import RotatingFileHandler
 import os
 import signal
+import socket
 import subprocess
 import sys
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
-
 
 EXTENSION_ID = "xangi-even-g2"
 
@@ -68,21 +71,37 @@ class Runtime:
     def start(self) -> None:
         bridge_dir = self.repo_dir / "bridge"
         child_env = dict(self.environ)
-        bridge_host = child_env.get("EVEN_BRIDGE_HOST", "0.0.0.0")
-        bridge_token = child_env.get("EVEN_BRIDGE_TOKEN", "").strip()
-        if bridge_host not in {"127.0.0.1", "::1", "localhost"} and not bridge_token:
-            raise RuntimeError(
-                "EVEN_BRIDGE_TOKEN is required when the bridge listens beyond loopback"
-            )
+        bridge_token = child_env.get("DEVICE_BRIDGE_TOKEN", child_env.get("EVEN_BRIDGE_TOKEN", "")).strip()
+        if not bridge_token:
+            raise RuntimeError("EVEN_BRIDGE_TOKEN is required for managed device access")
+        child_env["EVEN_BRIDGE_TOKEN"] = bridge_token
+        child_env["EVEN_BRIDGE_HOST"] = "127.0.0.1"
+        child_env["EVEN_STT_HOST"] = "127.0.0.1"
         host_url = child_env.get("XANGI_EXTENSION_HOST_URL", "").rstrip("/")
         if host_url:
             child_env["XANGI_BASE_URL"] = host_url
         child_env["PYTHONUNBUFFERED"] = "1"
-        self.bridge = self.start_logged_child("bridge", bridge_dir / "even_g2_bridge.py", child_env)
-        if self.stt_enabled:
-            self.stt = self.start_logged_child("stt", bridge_dir / "stt_server.py", child_env)
+        # Hold bound sockets until inherited by the child: no free-port race.
+        try:
+            if self.stt_enabled:
+                self.stt = self.start_bound_child("stt", bridge_dir / "stt_server.py", child_env, "EVEN_STT")
+                child_env["EVEN_STT_URL"] = f"http://127.0.0.1:{child_env['EVEN_STT_PORT']}/transcribe"
+            self.bridge = self.start_bound_child("bridge", bridge_dir / "even_g2_bridge.py", child_env, "EVEN_BRIDGE")
+            self.environ = child_env
+        except Exception:
+            self.stop()
+            raise
 
-    def start_logged_child(self, name: str, script: Path, env: dict[str, str]) -> subprocess.Popen:
+    def start_bound_child(self, name: str, script: Path, env: dict[str, str], prefix: str) -> subprocess.Popen:
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            listener.listen()
+            env[f"{prefix}_PORT"] = str(listener.getsockname()[1])
+            child_env = dict(env)
+            child_env["EVEN_LISTEN_FD"] = str(listener.fileno())
+            return self.start_logged_child(name, script, child_env, pass_fds=(listener.fileno(),))
+
+    def start_logged_child(self, name: str, script: Path, env: dict[str, str], pass_fds: tuple[int, ...] = ()) -> subprocess.Popen:
         log_dir = self.workspace / ".xangi" / "logs" / EXTENSION_ID
         log_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         log_path = log_dir / f"{name}.log"
@@ -93,7 +112,7 @@ class Runtime:
         try:
             process = subprocess.Popen(
                 [sys.executable, str(script)], cwd=script.parent, env=env,
-                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, pass_fds=pass_fds,
             )
         except Exception:
             handler.close()
@@ -160,6 +179,8 @@ class Runtime:
             },
             "stt": {
                 "enabled": self.stt_enabled,
+                "host": stt_host,
+                "port": stt_port if self.stt_enabled else None,
                 "running": self._running(self.stt) if self.stt_enabled else False,
                 "healthy": stt_ready,
                 **(
@@ -190,6 +211,83 @@ class Runtime:
             thread.join(timeout=2)
 
 
+def make_handler(runtime: Runtime, token: str):
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, _format: str, *_args: object) -> None:
+            # EventSource query strings can contain device credentials.
+            return
+
+        def do_GET(self) -> None:  # noqa: N802
+            self.handle_request()
+
+        def do_POST(self) -> None:  # noqa: N802
+            self.handle_request()
+
+        def handle_request(self) -> None:
+            if not hmac.compare_digest(self.headers.get("Authorization", "").encode(), f"Bearer {token}".encode()):
+                self.send_error(401)
+                return
+            if self.path == "/health" and self.command == "GET":
+                body = json.dumps(runtime.health(), ensure_ascii=False).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if not self.path.startswith("/device/"):
+                self.send_error(404)
+                return
+            path = self.path[len("/device"):]
+            parsed = urllib.parse.urlsplit(path)
+            auth = self.headers.get("X-Xangi-Device-Authorization", "")
+            given = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+            if parsed.path == "/terminal/events":
+                given = given or urllib.parse.parse_qs(parsed.query).get("token", [""])[0].strip()
+                query = urllib.parse.urlencode([
+                    (key, value) for key, value in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+                    if key != "token"
+                ])
+                path = urllib.parse.urlunsplit(("", "", parsed.path, query, ""))
+            expected = runtime.environ.get("EVEN_BRIDGE_TOKEN", "").strip()
+            if not expected or not hmac.compare_digest(given.encode(), expected.encode()):
+                self.send_error(401)
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if length < 0 or length > 32 * 1024 * 1024:
+                    self.send_error(413)
+                    return
+            except ValueError:
+                self.send_error(400)
+                return
+            connection = http.client.HTTPConnection("127.0.0.1", int(runtime.environ["EVEN_BRIDGE_PORT"]), timeout=65)
+            started = False
+            try:
+                connection.request(self.command, path, body=self.rfile.read(length), headers={
+                    "Authorization": f"Bearer {expected}",
+                    "Content-Type": self.headers.get("Content-Type", "application/json"),
+                })
+                response = connection.getresponse()
+                self.send_response(response.status)
+                for name in ("Content-Type", "Content-Length", "Cache-Control"):
+                    value = response.getheader(name)
+                    if value is not None:
+                        self.send_header(name, value)
+                self.end_headers()
+                started = True
+                while chunk := response.read1(65536):
+                    self.wfile.write(chunk)
+                    self.wfile.flush()
+            except (OSError, http.client.HTTPException):
+                if not started:
+                    self.send_error(502, "Device bridge unavailable")
+            finally:
+                connection.close()
+
+    return Handler
+
+
 def serve(workspace: Path) -> None:
     token = os.environ.get("XANGI_EXTENSION_AUTH_TOKEN", "").strip()
     if not token:
@@ -201,23 +299,7 @@ def serve(workspace: Path) -> None:
     runtime = Runtime(repo_dir, workspace.resolve(), child_env)
     runtime.start()
 
-    class Handler(BaseHTTPRequestHandler):
-        def log_message(self, _format: str, *_args: object) -> None:
-            return
-
-        def do_GET(self) -> None:  # noqa: N802
-            if self.headers.get("Authorization", "") != f"Bearer {token}":
-                self.send_error(401)
-                return
-            if self.path != "/health":
-                self.send_error(404)
-                return
-            body = json.dumps(runtime.health(), ensure_ascii=False).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+    Handler = make_handler(runtime, token)
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     stopped = threading.Event()

@@ -45,7 +45,11 @@ History is fetched in batches of 30 messages and paginated for the G2 display. S
 
 ## Connections and Settings
 
-The G2 app connects directly to the Tailnet-facing bridge listener, separate from the Managed Extension management endpoint. Managed runtime receives the parent xangi Web URL; standalone operation uses `XANGI_BASE_URL`.
+For a Managed Extension, set Bridge URL to `http://<xangi-host>:<xangi-port>/api/devices/xangi-even-g2`. The xangi host must support this ingress. Keep the dedicated `EVEN_BRIDGE_TOKEN` (`DEVICE_BRIDGE_TOKEN` is also accepted). Bridge and STT bind automatically allocated loopback ports; configured HOST/PORT values apply only to standalone operation. Do not enter internal ports in the companion.
+
+The host forwards the device token separately from the runtime token; the extension validates it. Audio POST and SSE use the same ingress. STT is not exposed externally.
+
+This uses the generic device ingress selected by the manifest `deviceIngress`, rather than a product-specific host route. This extension declares `capability: device.even-g2` and `authentication: extension-bearer`.
 
 Connection settings are saved and loaded through companion localStorage and Even storage. Build-time defaults apply when saved values are absent. Normal builds do not embed tokens. Configured private builds contain secrets and must not be published.
 

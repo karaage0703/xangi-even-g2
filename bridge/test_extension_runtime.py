@@ -1,17 +1,20 @@
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import Mock, patch
 
 from bridge.extension_runtime import Runtime, is_enabled, load_env_file
-
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -25,6 +28,9 @@ class ExtensionRuntimeUnitTest(unittest.TestCase):
         self.assertEqual(manifest["version"], package["version"])
         self.assertEqual(manifest["runtime"], {"kind": "managed-http"})
         self.assertEqual(manifest["entrypoint"], "scripts/xangi-extension")
+        self.assertEqual(manifest["deviceIngress"], {
+            "capability": "device.even-g2", "authentication": "extension-bearer",
+        })
         self.assertEqual(
             manifest["update"],
             {"prepare": {"command": "./scripts/prepare-update", "args": []}},
@@ -166,6 +172,22 @@ class ExtensionRuntimeSmokeTest(unittest.TestCase):
                 __import__("time").sleep(0.1)
             self.assertTrue(health["ready"])
             self.assertFalse(health["stt"]["enabled"])
+            self.assertEqual(health["bridge"]["host"], "127.0.0.1")
+            self.assertNotEqual(health["bridge"]["port"], bridge_port)
+            for headers in ({}, {"X-Xangi-Device-Authorization": "Bearer wrong"}):
+                with self.assertRaises(urllib.error.HTTPError) as rejected:
+                    urllib.request.urlopen(urllib.request.Request(
+                        f"{base_url}/device/health", headers={"Authorization": f"Bearer {token}", **headers}
+                    ), timeout=2)
+                self.assertEqual(rejected.exception.code, 401)
+            with urllib.request.urlopen(urllib.request.Request(
+                f"{base_url}/device/health", headers={
+                    "Authorization": f"Bearer {token}",
+                    "X-Xangi-Device-Authorization": "Bearer bridge-test-token",
+                }
+            ), timeout=2) as response:
+                self.assertTrue(json.loads(response.read())["ok"])
+            self.assertIsNone(health["stt"]["port"])
         finally:
             if process.stdin:
                 process.stdin.close()
@@ -176,6 +198,95 @@ class ExtensionRuntimeSmokeTest(unittest.TestCase):
             if process.stderr:
                 process.stderr.close()
             self.assertEqual(process.returncode, 0, stderr)
+
+
+class SharedPortIntegrationTest(unittest.TestCase):
+    def test_managed_children_audio_events_and_shutdown(self):
+        class Host(BaseHTTPRequestHandler):
+            def log_message(self, *_):
+                pass
+
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                body = b"data: ready\n\n"
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        host = ThreadingHTTPServer(("127.0.0.1", 0), Host)
+        threading.Thread(target=host.serve_forever, daemon=True).start()
+        self.addCleanup(host.server_close)
+        self.addCleanup(host.shutdown)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bridge = root / "bridge"
+            bridge.mkdir()
+            for name in ("extension_runtime.py", "even_g2_bridge.py", "managed_listener.py"):
+                shutil.copyfile(ROOT / "bridge" / name, bridge / name)
+            (bridge / "stt_server.py").write_text('''import json
+from http.server import BaseHTTPRequestHandler
+from managed_listener import create_server
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *_): pass
+    def send(self, obj):
+        body = json.dumps(obj).encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def do_GET(self): self.send({"ok": True, "model": "stub", "device": "cpu"})
+    def do_POST(self):
+        pcm = self.rfile.read(int(self.headers["Content-Length"]))
+        self.send({"text": "bytes=" + pcm.hex()})
+create_server("127.0.0.1", 0, Handler).serve_forever()
+''')
+            env = dict(os.environ, XANGI_EXTENSION_AUTH_TOKEN="runtime-secret",
+                       EVEN_BRIDGE_TOKEN="device-secret", EVEN_EXTENSION_STT_ENABLED="true",
+                       EVEN_BRIDGE_HOST="0.0.0.0", EVEN_BRIDGE_PORT="8791", EVEN_STT_PORT="8792",
+                       XANGI_EXTENSION_HOST_URL=f"http://127.0.0.1:{host.server_port}")
+            process = subprocess.Popen([sys.executable, str(bridge / "extension_runtime.py"), "serve", "--workspace", str(root)],
+                                       env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            ports = []
+            try:
+                ready = json.loads(process.stdout.readline())
+                base = ready["baseUrl"]
+                def request(path, data=None, device="device-secret"):
+                    return urllib.request.urlopen(urllib.request.Request(base + path, data=data, headers={
+                        "Authorization": "Bearer runtime-secret",
+                        "X-Xangi-Device-Authorization": f"Bearer {device}" if device else "",
+                    }), timeout=3)
+                for _ in range(50):
+                    with request("/health") as response:
+                        health = json.loads(response.read())
+                    if health["ready"]:
+                        break
+                    time.sleep(.05)
+                self.assertTrue(health["ready"])
+                ports = [health[key]["port"] for key in ("bridge", "stt")]
+                self.assertEqual(len(set(ports)), 2)
+                self.assertNotIn(8791, ports)
+                self.assertNotIn(8792, ports)
+                self.assertEqual(health["stt"]["host"], "127.0.0.1")
+                with request("/device/stt", b"\x00\xff\x80\x13") as response:
+                    self.assertEqual(json.loads(response.read()), {"text": "bytes=00ff8013"})
+                with request("/device/terminal/events?thread_id=test&token=device-secret", device="") as response:
+                    self.assertEqual(response.readline(), b"data: ready\n")
+                for path in ("/device/health?token=device-secret", "/device/terminal/events?token=wrong"):
+                    with self.assertRaises(urllib.error.HTTPError) as error:
+                        request(path, device="")
+                    self.assertEqual(error.exception.code, 401)
+            finally:
+                process.stdin.close()
+                process.wait(timeout=5)
+                stderr = process.stderr.read()
+                process.stdout.close()
+                process.stderr.close()
+                self.assertEqual(process.returncode, 0, stderr)
+            for port in ports:
+                with socket.socket() as client:
+                    self.assertNotEqual(client.connect_ex(("127.0.0.1", port)), 0)
+            self.assertNotIn("device-secret", (root / ".xangi/logs/xangi-even-g2/bridge.log").read_text())
 
 
 if __name__ == "__main__":

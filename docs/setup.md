@@ -1,5 +1,11 @@
 # xangi + Even G2 セットアップ
 
+通常の各自利用には、[Managed Extensionの短いHTTPS URL設定](../XANGI_SETUP.md#短いhttps-urlで接続する推奨)を推奨します。Tailnet内限定のServeと各自の専用トークンを使います。
+
+Managed Extensionでは、Bridge URLを`http://<xangi-host>:<xangi-port>/api/devices/xangi-even-g2`に設定します。この入口に対応したxangi本体が必要です。専用tokenは`EVEN_BRIDGE_TOKEN`（`DEVICE_BRIDGE_TOKEN`も利用可）を使います。bridgeとSTTはloopbackの自動割当ポートで起動し、設定済みのHOST/PORTは単体起動時だけ使います。内部ポートをcompanionへ設定しないでください。
+
+以下の固定ポート・PM2手順は単体起動用です。Managed Extensionの手順はリポジトリrootのXANGI_SETUP.mdを参照してください。
+
 [English setup guide](setup.en.md)
 
 Even Realities G2 から xangi を使うためのセットアップ手順です。
