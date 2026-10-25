@@ -9,7 +9,7 @@
     "run a local Whisper speech-to-text model",
     "read bridge/.env for local Even G2 settings"
   ],
-  "version": "0.1.24",
+  "version": "0.1.26",
   "entrypoint": "scripts/xangi-extension",
   "runtime": {
     "kind": "managed-http"
